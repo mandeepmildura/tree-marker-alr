@@ -18,7 +18,7 @@ TREE_SPACING =  3.0        # metres between trees
 NUM_TREES    =  50
 SPEED_MPS    =  1.0        # simulated walk speed (m/s)
 UDP_IP       = "172.20.10.3"   # ALR board direct IP (avoids broadcast subnet issues)
-UDP_PORT     = 9999
+UDP_PORT     = 8888
 INTERVAL     = 0.1         # seconds between sentences (10 Hz)
 # ──────────────────────────────────────────────────────────────────
 

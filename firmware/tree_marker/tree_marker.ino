@@ -20,7 +20,7 @@
 #include <Preferences.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.2.1"
+#define FW_VERSION "1.2.2"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -43,7 +43,7 @@
 #define DEF_RELAY_PULSE   600
 
 // ── AgIO UDP ──────────────────────────────────────────────────
-#define UDP_PORT  9999
+#define UDP_PORT  8888
 
 // ── MQTT topics ───────────────────────────────────────────────
 #define T_STATUS      "treemarker/status"
