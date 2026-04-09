@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tree Marker — Live Dashboard</title>
+
+<!-- Leaflet map -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- Paho MQTT over WebSocket -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+       background: #1a1a2e; color: #eee; display: flex; flex-direction: column; height: 100vh; }
+
+/* ── Header ── */
+#header {
+  background: #16213e; padding: 10px 16px;
+  display: flex; align-items: center; gap: 12px;
+  border-bottom: 2px solid #0f3460; flex-shrink: 0;
+}
+#header h1 { font-size: 17px; font-weight: 700; color: #e2e8f0; flex: 1; }
+#status-dot { width: 11px; height: 11px; border-radius: 50%; background: #e74c3c;
+              box-shadow: 0 0 6px #e74c3c; transition: all .4s; flex-shrink: 0; }
+#status-dot.connected { background: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+#status-label { font-size: 12px; color: #94a3b8; }
+
+/* ── Stats bar ── */
+#stats {
+  background: #16213e; padding: 7px 16px;
+  display: flex; gap: 20px; flex-wrap: wrap;
+  border-bottom: 1px solid #0f3460; flex-shrink: 0;
+}
+.stat { display: flex; flex-direction: column; align-items: center; min-width: 60px; }
+.stat-val { font-size: 22px; font-weight: 800; color: #38bdf8; line-height: 1.1; }
+.stat-val.hit { color: #4ade80; }
+.stat-lbl { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: .5px; }
+#last-hit { font-size: 12px; color: #94a3b8; align-self: center; margin-left: auto; }
+
+/* ── Map ── */
+#map { flex: 1; }
+
+/* ── Hit log ── */
+#log-panel {
+  background: #16213e; border-top: 1px solid #0f3460;
+  height: 130px; overflow-y: auto; flex-shrink: 0;
+}
+#log-panel h2 { font-size: 11px; color: #64748b; padding: 6px 12px 4px;
+                text-transform: uppercase; letter-spacing: .5px;
+                position: sticky; top: 0; background: #16213e; z-index: 1; }
+#log-list { list-style: none; padding: 0 12px 8px; }
+#log-list li {
+  font-size: 11px; padding: 3px 0; border-bottom: 1px solid #1e293b;
+  color: #cbd5e1; display: flex; gap: 10px;
+}
+#log-list li .tag {
+  background: #166534; color: #4ade80;
+  padding: 1px 6px; border-radius: 3px; font-weight: 700;
+  font-size: 10px; white-space: nowrap;
+}
+#log-list li .coords { color: #64748b; font-size: 10px; }
+
+/* ── Leaflet overrides ── */
+.planned-dot { /* SVG circle element */ }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div id="header">
+  <div id="status-dot"></div>
+  <div id="status-label">Connecting…</div>
+  <h1>Tree Marker — Live Dashboard</h1>
+  <div style="font-size:11px;color:#475569;">Sunraysia Acres</div>
+</div>
+
+<!-- Stats bar -->
+<div id="stats">
+  <div class="stat">
+    <div class="stat-val hit" id="s-hits">0</div>
+    <div class="stat-lbl">Hits</div>
+  </div>
+  <div class="stat">
+    <div class="stat-val" id="s-planned">—</div>
+    <div class="stat-lbl">Planned</div>
+  </div>
+  <div class="stat">
+    <div class="stat-val" id="s-pct">—</div>
+    <div class="stat-lbl">Done %</div>
+  </div>
+  <div class="stat">
+    <div class="stat-val" id="s-row">—</div>
+    <div class="stat-lbl">Last Row</div>
+  </div>
+  <div class="stat">
+    <div class="stat-val" id="s-tree">—</div>
+    <div class="stat-lbl">Last Tree</div>
+  </div>
+  <div id="last-hit">No hits yet this session</div>
+</div>
+
+<!-- Map -->
+<div id="map"></div>
+
+<!-- Hit log -->
+<div id="log-panel">
+  <h2>Hit Log</h2>
+  <ul id="log-list"></ul>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  GRID CONFIG — must match tree_marker.ino exactly
+// ═══════════════════════════════════════════════════════
+const CFG = {
+  originLat:   -34.3166591,
+  originLon:    142.1562539,
+  rowBearing:   180.0,      // degrees (0=N, 90=E, 180=S)
+  rowSpacing:     6.7,      // metres between rows
+  treeSpacing:    3.0,      // metres between trees
+  numRows:       10,
+  numTrees:      50,
+};
+
+// MQTT — HiveMQ Cloud
+const MQTT = {
+  host:   "eb65c13ec8ab480a9c8492778fdddda8.s1.eu.hivemq.cloud",
+  port:   8884,             // WSS
+  user:   "mandeep",
+  pass:   "Gill@1977",
+  topic:  "treemarker/hit",
+  status: "treemarker/status",
+};
+
+// ═══════════════════════════════════════════════════════
+//  GRID MATHS  (mirrors firmware C++ exactly)
+// ═══════════════════════════════════════════════════════
+const M_PER_DEG_LAT = 111320.0;
+const mPerDegLon    = 111320.0 * Math.cos(CFG.originLat * Math.PI / 180.0);
+const bearingRad     = CFG.rowBearing * Math.PI / 180.0;
+const perpBearingRad = bearingRad + Math.PI / 2.0;
+
+function treePos(r, t) {
+  const along  = t * CFG.treeSpacing;
+  const across = r * CFG.rowSpacing;
+  const lat = CFG.originLat +
+    (along * Math.cos(bearingRad) + across * Math.cos(perpBearingRad)) / M_PER_DEG_LAT;
+  const lon = CFG.originLon +
+    (along * Math.sin(bearingRad) + across * Math.sin(perpBearingRad)) / mPerDegLon;
+  return [lat, lon];
+}
+
+// Pre-calc all positions
+const grid = [];   // grid[r][t] = [lat, lon]
+for (let r = 0; r < CFG.numRows; r++) {
+  grid[r] = [];
+  for (let t = 0; t < CFG.numTrees; t++) {
+    grid[r][t] = treePos(r, t);
+  }
+}
+const total = CFG.numRows * CFG.numTrees;
+
+// ═══════════════════════════════════════════════════════
+//  MAP INIT
+// ═══════════════════════════════════════════════════════
+const [cLat, cLon] = treePos(CFG.numRows / 2, CFG.numTrees / 2);
+const map = L.map("map").setView([cLat, cLon], 17);
+
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "© OpenStreetMap",
+  maxZoom: 21,
+}).addTo(map);
+
+// Satellite layer toggle
+const satLayer = L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  { attribution: "© Esri", maxZoom: 21 }
+);
+L.control.layers(
+  { "Street": map._layers[Object.keys(map._layers)[0]], "Satellite": satLayer },
+  {}, { position: "topright" }
+).addTo(map);
+
+// ── Draw planned tree dots (grey) ──
+const plannedLayer = L.layerGroup().addTo(map);
+const hitSet = new Set();   // "r,t" keys already hit
+
+for (let r = 0; r < CFG.numRows; r++) {
+  for (let t = 0; t < CFG.numTrees; t++) {
+    const [lat, lon] = grid[r][t];
+    L.circleMarker([lat, lon], {
+      radius: 4, color: "#475569", weight: 1,
+      fillColor: "#334155", fillOpacity: 0.8,
+    })
+    .bindTooltip(`Row ${r}  Tree ${t}`, { direction: "top", offset: [0, -4] })
+    .addTo(plannedLayer);
+  }
+}
+
+// Draw row lines
+for (let r = 0; r < CFG.numRows; r++) {
+  const pts = grid[r].map(([lat, lon]) => [lat, lon]);
+  L.polyline(pts, { color: "#1e40af", weight: 1, opacity: 0.4 }).addTo(map);
+}
+
+// Origin marker
+L.marker([CFG.originLat, CFG.originLon])
+  .bindPopup("<b>Origin</b><br>Row 0, Tree 0<br>(placeholder — update after field survey)")
+  .addTo(map);
+
+document.getElementById("s-planned").textContent = total;
+
+// ═══════════════════════════════════════════════════════
+//  HIT HANDLING
+// ═══════════════════════════════════════════════════════
+let hitCount = 0;
+const hitLayer = L.layerGroup().addTo(map);
+
+function addHit(data) {
+  const { row, tree, dist, lat, lon } = data;
+  const key = `${row},${tree}`;
+  if (hitSet.has(key)) return;   // deduplicate (reconnect replays)
+  hitSet.add(key);
+  hitCount++;
+
+  // Green hit marker
+  L.circleMarker([lat, lon], {
+    radius: 6, color: "#15803d", weight: 2,
+    fillColor: "#4ade80", fillOpacity: 0.9,
+  })
+  .bindPopup(
+    `<b>HIT — Row ${row}, Tree ${tree}</b><br>` +
+    `Distance from centre: ${dist.toFixed(2)} m<br>` +
+    `${lat.toFixed(7)}, ${lon.toFixed(7)}<br>` +
+    `<small>${new Date().toLocaleTimeString()}</small>`
+  )
+  .addTo(hitLayer);
+
+  // Stats
+  document.getElementById("s-hits").textContent  = hitCount;
+  document.getElementById("s-row").textContent   = row;
+  document.getElementById("s-tree").textContent  = tree;
+  const pct = ((hitCount / total) * 100).toFixed(1);
+  document.getElementById("s-pct").textContent   = pct + "%";
+  document.getElementById("last-hit").textContent =
+    `Last: R${row} T${tree}  ${dist.toFixed(2)}m  @ ${new Date().toLocaleTimeString()}`;
+
+  // Log entry
+  const li = document.createElement("li");
+  li.innerHTML =
+    `<span class="tag">R${row} T${tree}</span>` +
+    `<span>${new Date().toLocaleTimeString()} — ${dist.toFixed(2)} m from centre</span>` +
+    `<span class="coords">${lat.toFixed(6)}, ${lon.toFixed(6)}</span>`;
+  const list = document.getElementById("log-list");
+  list.prepend(li);
+}
+
+// ═══════════════════════════════════════════════════════
+//  MQTT CONNECTION
+// ═══════════════════════════════════════════════════════
+const clientId = "dashboard-" + Math.random().toString(36).substr(2, 6);
+const client   = new Paho.MQTT.Client(MQTT.host, MQTT.port, "/mqtt", clientId);
+
+function setStatus(connected, label) {
+  const dot = document.getElementById("status-dot");
+  const lbl = document.getElementById("status-label");
+  dot.className = connected ? "connected" : "";
+  lbl.textContent = label;
+}
+
+client.onConnectionLost = (resp) => {
+  setStatus(false, "Disconnected — retrying…");
+  setTimeout(connect, 3000);
+};
+
+client.onMessageArrived = (msg) => {
+  try {
+    const data = JSON.parse(msg.payloadString);
+    if (msg.destinationName === MQTT.topic) addHit(data);
+  } catch(e) { /* ignore malformed */ }
+};
+
+function connect() {
+  setStatus(false, "Connecting…");
+  client.connect({
+    useSSL: true,
+    userName: MQTT.user,
+    password: MQTT.pass,
+    keepAliveInterval: 30,
+    cleanSession: true,
+    onSuccess: () => {
+      setStatus(true, "Live — MQTT connected");
+      client.subscribe(MQTT.topic);
+      client.subscribe(MQTT.status);
+    },
+    onFailure: (err) => {
+      setStatus(false, "Connection failed — retrying…");
+      setTimeout(connect, 5000);
+    },
+  });
+}
+
+connect();
+
+// ── Map zoom to fit grid on load ──
+const allPts = [];
+for (let r = 0; r < CFG.numRows; r++)
+  for (let t = 0; t < CFG.numTrees; t++)
+    allPts.push(grid[r][t]);
+map.fitBounds(L.latLngBounds(allPts).pad(0.15));
+</script>
+</body>
+</html>

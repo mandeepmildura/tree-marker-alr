@@ -19,30 +19,30 @@
 #include <Adafruit_SSD1306.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.0.0"
+#define FW_VERSION "1.0.1"
 
 // ================================================================
 //  USER CONFIG — edit these before first flash
 // ================================================================
 
 // WiFi (must be same network as AgOpenGPS tablet / phone hotspot)
-const char* WIFI_SSID     = "YourHotspotName";
-const char* WIFI_PASSWORD = "YourPassword";
+const char* WIFI_SSID     = "Mandeep";
+const char* WIFI_PASSWORD = "rockyjungle161";
 
 // HiveMQ broker
-const char* MQTT_HOST     = "your-id.s1.eu.hivemq.cloud";
+const char* MQTT_HOST     = "eb65c13ec8ab480a9c8492778fdddda8.s1.eu.hivemq.cloud";
 const int   MQTT_PORT     = 8883;           // TLS port
-const char* MQTT_USER     = "your-mqtt-user";
-const char* MQTT_PASS     = "your-mqtt-pass";
+const char* MQTT_USER     = "mandeep";
+const char* MQTT_PASS     = "Gill@1977";
 const char* MQTT_CLIENT   = "tree-marker-alr-01";
 
 // AgIO UDP — AIO Teensy broadcasts NMEA here
 #define UDP_PORT  9999
 
 // Grid — set from field survey, leave as-is for simulation
-const double ORIGIN_LAT   = -34.200000;   // First tree (tree 0, row 0)
-const double ORIGIN_LON   =  142.150000;
-const double ROW_BEARING  =   90.0;       // Degrees: 0=N, 90=E, 180=S, 270=W
+const double ORIGIN_LAT   = -34.3166591;  // First tree (tree 0, row 0) — Sunraysia Acres
+const double ORIGIN_LON   =  142.1562539;
+const double ROW_BEARING  =  180.0;       // Degrees: 0=N, 90=E, 180=S, 270=W
 const double ROW_SPACING  =    6.7;       // Metres between rows
 const double TREE_SPACING =    3.0;       // Metres between trees in a row
 const int    NUM_ROWS     =   10;
@@ -95,6 +95,7 @@ bool   gpsFix   = false;
 unsigned long lastFixMs    = 0;
 int    totalHits           = 0;
 unsigned long lastHeartbeat = 0;
+unsigned long lastMachineSend = 0;
 bool   otaPending  = false;
 String otaUrl      = "";
 
@@ -294,6 +295,38 @@ void buildGrid() {
     NUM_ROWS, NUM_TREES, ROW_SPACING, TREE_SPACING, HIT_RADIUS);
 }
 
+// ── PGN 239 — send section state back to AgOpenGPS ───────────
+// AgIO listens on port 8888. Bit 0 of sections byte = section 1 (our relay).
+// AgOpenGPS lights up the coverage map while section is ON.
+void sendMachinePGN() {
+  uint8_t sections = relayActive ? 0x01 : 0x00;
+
+  uint8_t pkt[12];
+  pkt[0]  = 0x80;
+  pkt[1]  = 0x81;
+  pkt[2]  = 0x7E;   // source: machine module
+  pkt[3]  = 239;    // PGN
+  pkt[4]  = 8;      // data length
+  pkt[5]  = sections;
+  pkt[6]  = 0;      // sections hi byte
+  pkt[7]  = 0;      // tram
+  pkt[8]  = 0;      // uturn
+  pkt[9]  = 0;      // speed lo
+  pkt[10] = 0;      // speed hi
+  uint8_t crc = 0;
+  for (int i = 2; i <= 10; i++) crc ^= pkt[i];
+  pkt[11] = crc;
+
+  // Compute broadcast address from DHCP info
+  IPAddress bcast = WiFi.localIP();
+  IPAddress mask  = WiFi.subnetMask();
+  for (int i = 0; i < 4; i++) bcast[i] |= ~mask[i];
+
+  udp.beginPacket(bcast, 8888);
+  udp.write(pkt, 12);
+  udp.endPacket();
+}
+
 // ── setup ─────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
@@ -385,6 +418,12 @@ void loop() {
       "{\"online\":true,\"fw\":\"%s\",\"uptime\":%lu,\"hits\":%d,\"fix\":%s}",
       FW_VERSION, millis() / 1000, totalHits, gpsFix ? "true" : "false");
     mqtt.publish(T_STATUS, hb, true);
+  }
+
+  // PGN 239 section state to AgOpenGPS every 100ms
+  if (WiFi.status() == WL_CONNECTED && millis() - lastMachineSend > 100) {
+    sendMachinePGN();
+    lastMachineSend = millis();
   }
 
   // OLED every 400ms
