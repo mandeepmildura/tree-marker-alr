@@ -20,7 +20,7 @@
 #include <Preferences.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.2.2"
+#define FW_VERSION "1.2.3"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -77,6 +77,7 @@ int    gNumRows;
 int    gNumTrees;
 double gHitRadius;
 int    gRelayPulse;
+int    gUdpPort;
 
 Preferences prefs;
 
@@ -97,6 +98,7 @@ void loadPrefs() {
   gNumTrees    = prefs.getInt(   "num_trees",   DEF_NUM_TREES);
   gHitRadius   = prefs.getDouble("hit_radius",  DEF_HIT_RADIUS);
   gRelayPulse  = prefs.getInt(   "relay_pulse", DEF_RELAY_PULSE);
+  gUdpPort     = prefs.getInt(   "udp_port",    UDP_PORT);
   prefs.end();
 }
 
@@ -118,6 +120,7 @@ void saveWifiPrefs() {
   prefs.begin("tm", false);
   prefs.putString("wifi_ssid", gWifiSsid);
   prefs.putString("wifi_pass", gWifiPass);
+  prefs.putInt(   "udp_port",  gUdpPort);
   prefs.end();
 }
 
@@ -296,9 +299,16 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     <div class=g2>
       <div class=fg><label>Network Name (SSID)</label><input id=f-ssid type=text></div>
       <div class=fg><label>Password</label><input id=f-wpass type=password placeholder="(leave blank to keep current)"></div>
+      <div class=fg><label>AgIO UDP Port</label><input id=f-udp type=number step=1 min=1 max=65535></div>
     </div>
-    <button class="btn btn-w" onclick=saveWifi()><span>Save WiFi + Reboot</span><span class=bi>&#8635;</span></button>
-    <p class=note>Board will reconnect to new network after reboot.</p>
+    <button class="btn btn-w" onclick=saveWifi()><span>Save Network + Reboot</span><span class=bi>&#8635;</span></button>
+    <p class=note>Board will reconnect after reboot. Default AgIO port is 8888.</p>
+  </div>
+  <div class=card>
+    <div class=clbl>Firmware Update (OTA)</div>
+    <div class=fg><label>Firmware .bin URL (from GitHub Releases)</label><input id=f-ota type=text placeholder="https://github.com/.../releases/download/vX.Y.Z/tree_marker.ino.bin"></div>
+    <button class="btn btn-p" onclick=flashOta()><span>Flash Firmware Now</span><span class=bi>&#8659;</span></button>
+    <p class=note id=ota-status>Board will download, flash, and reboot automatically.</p>
   </div>
 </div>
 
@@ -347,6 +357,7 @@ var poll=()=>{
     document.getElementById('f-hr').value=c.hr;
     document.getElementById('f-rp').value=c.rp;
     document.getElementById('f-ssid').value=c.ssid;
+    document.getElementById('f-udp').value=c.udp;
   }).catch(()=>{});
 };
 var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
@@ -362,10 +373,22 @@ var saveGrid=()=>{
 var saveWifi=()=>{
   const ssid=document.getElementById('f-ssid').value;
   const pass=document.getElementById('f-wpass').value;
+  const udp=+document.getElementById('f-udp').value;
   if(!ssid){alert('SSID cannot be empty');return;}
-  if(!confirm('Save WiFi "'+ssid+'" and reboot?'))return;
+  if(!confirm('Save network settings and reboot?'))return;
   fetch('/config/wifi',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ssid:ssid,pass:pass})}).then(r=>r.text()).then(t=>alert(t));
+    body:JSON.stringify({ssid:ssid,pass:pass,udp:udp})}).then(r=>r.text()).then(t=>alert(t));
+};
+var flashOta=()=>{
+  const url=document.getElementById('f-ota').value.trim();
+  if(!url){alert('Paste a .bin URL first');return;}
+  if(!confirm('Flash firmware from:\n'+url+'\n\nBoard will reboot after flashing.'))return;
+  const st=document.getElementById('ota-status');
+  st.textContent='Sending to board...';
+  fetch('/ota',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({url:url})})
+    .then(r=>r.text()).then(t=>{st.textContent=t;})
+    .catch(e=>{st.textContent='Error: '+e;});
 };
 poll();setInterval(poll,2000);
 </script>
@@ -585,7 +608,7 @@ void handleStatus() {
     "\"lat\":%.7f,\"lon\":%.7f,"
     "\"cfg\":{\"lat\":%.7f,\"lon\":%.7f,\"brg\":%.1f,"
     "\"rs\":%.1f,\"ts\":%.1f,\"rows\":%d,\"trees\":%d,"
-    "\"hr\":%.2f,\"rp\":%d,\"ssid\":\"%s\"}}",
+    "\"hr\":%.2f,\"rp\":%d,\"ssid\":\"%s\",\"udp\":%d}}",
     WiFi.status()==WL_CONNECTED?"true":"false",
     mqtt.connected()?"true":"false",
     gpsFix?"true":"false",
@@ -595,7 +618,7 @@ void handleStatus() {
     curLat, curLon,
     gOriginLat, gOriginLon, gRowBearing,
     gRowSpacing, gTreeSpacing, gNumRows, gNumTrees,
-    gHitRadius, gRelayPulse, gWifiSsid
+    gHitRadius, gRelayPulse, gWifiSsid, gUdpPort
   );
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
   webServer.send(200, "application/json", json);
@@ -669,10 +692,31 @@ void handleConfigWifi() {
   }
   strlcpy(gWifiSsid, ssid.c_str(), sizeof(gWifiSsid));
   if (pass.length() > 0) strlcpy(gWifiPass, pass.c_str(), sizeof(gWifiPass));
+  int newPort = (int)jsonFloat(body, "udp");
+  if (newPort > 0 && newPort != gUdpPort) {
+    gUdpPort = newPort;
+    udp.stop();
+    udp.begin(gUdpPort);
+    Serial.printf("WEB: UDP port changed to %d\n", gUdpPort);
+  }
   saveWifiPrefs();
-  webServer.send(200, "text/plain", "WiFi saved — rebooting in 2s...");
+  webServer.send(200, "text/plain", "Network saved — rebooting in 2s...");
   delay(2000);
   ESP.restart();
+}
+
+void handleOtaWeb() {
+  if (webServer.method() != HTTP_POST) {
+    webServer.send(405, "text/plain", "POST only"); return;
+  }
+  String url = jsonStr(webServer.arg("plain"), "url");
+  if (url.length() < 10) {
+    webServer.send(400, "text/plain", "Missing url"); return;
+  }
+  otaUrl     = url;
+  otaPending = true;
+  webServer.send(200, "text/plain", "OTA queued — flashing now, board will reboot");
+  Serial.println("WEB: OTA triggered: " + url);
 }
 
 // ================================================================
@@ -711,11 +755,12 @@ void setup() {
   webServer.on("/relay",       HTTP_POST, handleRelay);
   webServer.on("/config/grid", HTTP_POST, handleConfigGrid);
   webServer.on("/config/wifi", HTTP_POST, handleConfigWifi);
+  webServer.on("/ota",         HTTP_POST, handleOtaWeb);
   webServer.begin();
   Serial.printf("Web UI: http://%s/\n", WiFi.localIP().toString().c_str());
 
-  udp.begin(UDP_PORT);
-  Serial.printf("UDP listening on port %d\n", UDP_PORT);
+  udp.begin(gUdpPort);
+  Serial.printf("UDP listening on port %d\n", gUdpPort);
 
   tlsClient.setInsecure();
   mqtt.setServer(gMqttHost, gMqttPort);
