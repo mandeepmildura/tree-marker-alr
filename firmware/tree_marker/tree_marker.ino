@@ -304,15 +304,15 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
 
 </main>
 <script>
-function showTab(t,btn){
+var showTab=(t,btn)=>{
   document.querySelectorAll('.sec').forEach(e=>e.classList.remove('active'));
   document.querySelectorAll('.nb').forEach(e=>e.classList.remove('active'));
   document.getElementById('t-'+t).classList.add('active');
   btn.classList.add('active');
-}
-function uptime(s){return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m '+s%60+'s'}
-function setv(id,txt,cls){const e=document.getElementById(id);if(e){e.textContent=txt;if(cls!==undefined)e.className='sv '+(cls?'ok':'bad');}}
-function poll(){
+};
+var uptime=(s)=>Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m '+s%60+'s';
+var setv=(id,txt,cls)=>{const e=document.getElementById(id);if(e){e.textContent=txt;if(cls!==undefined)e.className='sv '+(cls?'ok':'bad');}};
+var poll=()=>{
   fetch('/api/status').then(r=>r.json()).then(d=>{
     const ok=d.wifi,mo=d.mqtt,go=d.fix;
     const p=document.getElementById('spill');
@@ -322,19 +322,19 @@ function poll(){
     setv('s-ip',d.ip,true);
     setv('s-mqtt',mo?'Connected':'Disconnected',mo);
     setv('s-gps',go?'RTK Fix':'No Fix',go);
-    document.getElementById('s-pos').textContent=go?d.lat.toFixed(7)+', '+d.lon.toFixed(7):'—';
+    document.getElementById('s-pos').textContent=go?d.lat.toFixed(7)+', '+d.lon.toFixed(7):'-';
     document.getElementById('s-up').textContent=uptime(d.uptime);
     document.getElementById('s-fw').textContent='v'+d.fw;
     document.getElementById('hfw').textContent='fw v'+d.fw;
     document.getElementById('s-hits').textContent=d.hits;
-    document.getElementById('s-lrow').textContent=d.lastRow>=0?d.lastRow:'—';
-    document.getElementById('s-ltree').textContent=d.lastTree>=0?d.lastTree:'—';
-    document.getElementById('s-ldist').textContent=d.lastDist>0?d.lastDist.toFixed(3)+'m':'—';
+    document.getElementById('s-lrow').textContent=d.lastRow>=0?d.lastRow:'-';
+    document.getElementById('s-ltree').textContent=d.lastTree>=0?d.lastTree:'-';
+    document.getElementById('s-ldist').textContent=d.lastDist>0?d.lastDist.toFixed(3)+'m':'-';
     const c=d.cfg;
     document.getElementById('c-origin').textContent=c.lat.toFixed(7)+', '+c.lon.toFixed(7);
-    document.getElementById('c-brg').textContent=c.brg+'\u00b0';
+    document.getElementById('c-brg').textContent=c.brg+' deg';
     document.getElementById('c-spacing').textContent=c.rs+'m / '+c.ts+'m';
-    document.getElementById('c-grid').textContent=c.rows+' \u00d7 '+c.trees;
+    document.getElementById('c-grid').textContent=c.rows+' x '+c.trees;
     document.getElementById('c-hr').textContent=c.hr+' m';
     document.getElementById('c-rp').textContent=c.rp+' ms';
     document.getElementById('f-lat').value=c.lat;
@@ -348,9 +348,9 @@ function poll(){
     document.getElementById('f-rp').value=c.rp;
     document.getElementById('f-ssid').value=c.ssid;
   }).catch(()=>{});
-}
-function testRelay(){fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));}
-function saveGrid(){
+};
+var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
+var saveGrid=()=>{
   const b={lat:+document.getElementById('f-lat').value,lon:+document.getElementById('f-lon').value,
     brg:+document.getElementById('f-brg').value,rs:+document.getElementById('f-rs').value,
     ts:+document.getElementById('f-ts').value,nr:+document.getElementById('f-nr').value,
@@ -358,15 +358,15 @@ function saveGrid(){
     rp:+document.getElementById('f-rp').value};
   fetch('/config/grid',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})
     .then(r=>r.text()).then(t=>{alert(t);poll();});
-}
-function saveWifi(){
+};
+var saveWifi=()=>{
   const ssid=document.getElementById('f-ssid').value;
   const pass=document.getElementById('f-wpass').value;
   if(!ssid){alert('SSID cannot be empty');return;}
   if(!confirm('Save WiFi "'+ssid+'" and reboot?'))return;
   fetch('/config/wifi',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({ssid:ssid,pass:pass})}).then(r=>r.text()).then(t=>alert(t));
-}
+};
 poll();setInterval(poll,2000);
 </script>
 </body></html>)rawpage";
