@@ -20,7 +20,7 @@
 #include <Preferences.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.2.3"
+#define FW_VERSION "1.2.4"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -393,6 +393,23 @@ var flashOta=()=>{
 poll();setInterval(poll,2000);
 </script>
 </body></html>)rawpage";
+
+// ── AgIO PGN 200 — binary GPS position packet ─────────────────
+// Header: 0x80 0x81 <src> 200 <len>
+// Data:   int32 lat*1e7 LE, int32 lon*1e7 LE  (+ optional heading/speed/fix)
+bool parsePGN200(uint8_t* buf, int len, double& lat, double& lon) {
+  if (len < 13) return false;
+  if (buf[0] != 0x80 || buf[1] != 0x81) return false;
+  if (buf[3] != 200) return false;
+  int32_t latI, lonI;
+  memcpy(&latI, &buf[5], 4);
+  memcpy(&lonI, &buf[9], 4);
+  lat = latI / 10000000.0;
+  lon = lonI / 10000000.0;
+  // sanity check — reject obviously bogus positions
+  if (lat == 0.0 && lon == 0.0) return false;
+  return true;
+}
 
 // ── NMEA GGA parser ───────────────────────────────────────────
 bool parseGGA(const char* s, double& lat, double& lon) {
@@ -794,18 +811,26 @@ void loop() {
   // Read UDP from AgIO
   int pkt = udp.parsePacket();
   if (pkt > 0) {
-    char buf[256];
+    uint8_t buf[256];
     int len = udp.read(buf, sizeof(buf) - 1);
-    buf[len] = '\0';
-    char* line = strtok(buf, "\r\n");
-    while (line) {
-      double lat, lon;
-      if (parseGGA(line, lat, lon)) {
-        gpsFix = true; curLat = lat; curLon = lon;
-        lastFixMs = millis();
-        checkGrid(lat, lon);
+    double lat, lon;
+    if (parsePGN200(buf, len, lat, lon)) {
+      // Binary AgIO PGN 200
+      gpsFix = true; curLat = lat; curLon = lon;
+      lastFixMs = millis();
+      checkGrid(lat, lon);
+    } else {
+      // Fallback: NMEA text ($GNGGA / $GPGGA)
+      buf[len] = '\0';
+      char* line = strtok((char*)buf, "\r\n");
+      while (line) {
+        if (parseGGA(line, lat, lon)) {
+          gpsFix = true; curLat = lat; curLon = lon;
+          lastFixMs = millis();
+          checkGrid(lat, lon);
+        }
+        line = strtok(nullptr, "\r\n");
       }
-      line = strtok(nullptr, "\r\n");
     }
   }
 
