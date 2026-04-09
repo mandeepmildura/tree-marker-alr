@@ -20,7 +20,7 @@
 #include <Preferences.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.2.1"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -550,11 +550,12 @@ void mqttConnect() {
 void doOTA() {
   mqtt.publish(T_OTA_STATUS, "starting");
   updateOLED();
-  tlsClient.setInsecure();
+  WiFiClientSecure otaClient;
+  otaClient.setInsecure();
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   httpUpdate.rebootOnUpdate(true);
   Serial.printf("OTA from: %s\n", otaUrl.c_str());
-  t_httpUpdate_return ret = httpUpdate.update(tlsClient, otaUrl);
+  t_httpUpdate_return ret = httpUpdate.update(otaClient, otaUrl);
   switch (ret) {
     case HTTP_UPDATE_OK:
       mqtt.publish(T_OTA_STATUS, "success"); break;
