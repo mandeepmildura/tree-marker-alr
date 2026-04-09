@@ -168,20 +168,20 @@ const total = CFG.numRows * CFG.numTrees;
 //  MAP INIT
 // ═══════════════════════════════════════════════════════
 const [cLat, cLon] = treePos(CFG.numRows / 2, CFG.numTrees / 2);
-const map = L.map("map").setView([cLat, cLon], 17);
+const map = L.map("map", { maxZoom: 20 }).setView([cLat, cLon], 19);
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "© OpenStreetMap",
-  maxZoom: 21,
-}).addTo(map);
+const streetLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "© OpenStreetMap", maxNativeZoom: 19, maxZoom: 20,
+});
 
-// Satellite layer toggle
+// Satellite default — maxNativeZoom 19, oversampled to 22
 const satLayer = L.tileLayer(
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-  { attribution: "© Esri", maxZoom: 21 }
-);
+  { attribution: "© Esri", maxNativeZoom: 19, maxZoom: 20 }
+).addTo(map);
+
 L.control.layers(
-  { "Street": map._layers[Object.keys(map._layers)[0]], "Satellite": satLayer },
+  { "Satellite": satLayer, "Street": streetLayer },
   {}, { position: "topright" }
 ).addTo(map);
 
@@ -193,10 +193,10 @@ for (let r = 0; r < CFG.numRows; r++) {
   for (let t = 0; t < CFG.numTrees; t++) {
     const [lat, lon] = grid[r][t];
     L.circleMarker([lat, lon], {
-      radius: 4, color: "#475569", weight: 1,
-      fillColor: "#334155", fillOpacity: 0.8,
+      radius: 6, color: "#ffffff", weight: 1.5,
+      fillColor: "#facc15", fillOpacity: 0.85,
     })
-    .bindTooltip(`Row ${r}  Tree ${t}`, { direction: "top", offset: [0, -4] })
+    .bindTooltip(`Row ${r}  Tree ${t}`, { direction: "top", offset: [0, -6] })
     .addTo(plannedLayer);
   }
 }
@@ -204,12 +204,12 @@ for (let r = 0; r < CFG.numRows; r++) {
 // Draw row lines
 for (let r = 0; r < CFG.numRows; r++) {
   const pts = grid[r].map(([lat, lon]) => [lat, lon]);
-  L.polyline(pts, { color: "#1e40af", weight: 1, opacity: 0.4 }).addTo(map);
+  L.polyline(pts, { color: "#facc15", weight: 1, opacity: 0.5 }).addTo(map);
 }
 
 // Origin marker
 L.marker([CFG.originLat, CFG.originLon])
-  .bindPopup("<b>Origin</b><br>Row 0, Tree 0<br>(placeholder — update after field survey)")
+  .bindPopup(`<b>Origin — Row 0, Tree 0</b><br>${CFG.originLat.toFixed(7)}, ${CFG.originLon.toFixed(7)}<br>Bearing: ${CFG.rowBearing}&deg;`)
   .addTo(map);
 
 document.getElementById("s-planned").textContent = total;
