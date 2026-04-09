@@ -155,142 +155,186 @@ String otaUrl       = "";
 //  WEB PAGE (served from ESP32 at http://board-ip/)
 // ================================================================
 const char PAGE[] PROGMEM = R"rawpage(<!DOCTYPE html>
-<html><head>
+<html lang=en>
+<head>
 <meta charset=UTF-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Tree Marker ALR</title>
+<title>Tree Marker ALR — Sunraysia Acres</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;700&family=Manrope:wght@400;500;600;700&display=swap" rel=stylesheet>
 <style>
+:root{--bg:#fcf9f4;--sl:#f6f3ee;--sc:#f0ede8;--sh:#ebe8e3;--sw:#e5e2dd;--wh:#ffffff;--pr:#006e2f;--pb:#22c55e;--tx:#1c1c19;--tv:#3d4a3d;--mu:#6d7b6c;--ol:#bccbb9;--er:#ba1a1a}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0f172a;color:#e2e8f0}
-header{background:#1e293b;padding:14px 20px;border-bottom:2px solid #334155;display:flex;align-items:center;gap:10px}
-header h1{font-size:17px;flex:1}
-.dot{width:10px;height:10px;border-radius:50%;background:#ef4444;flex-shrink:0}
-.dot.ok{background:#22c55e;box-shadow:0 0 6px #22c55e}
-main{padding:14px;max-width:560px;margin:auto}
-.tabs{display:flex;gap:4px;margin-bottom:0}
-.tab{background:#334155;color:#94a3b8;border:none;padding:8px 18px;border-radius:6px 6px 0 0;cursor:pointer;font-size:13px}
-.tab.active{background:#1e293b;color:#e2e8f0;font-weight:600}
-.section{display:none}
-.section.active{display:block}
-.card{background:#1e293b;border-radius:0 8px 8px 8px;padding:14px;margin:0 0 12px;border:1px solid #334155}
-.card:not(:first-child){border-radius:8px}
-.card h2{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
-.row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #0f172a;font-size:13px}
-.row:last-child{border:none}
-.val{color:#38bdf8;font-weight:600}
-.val.ok{color:#22c55e}
-.val.bad{color:#ef4444}
-.val.hit{color:#4ade80;font-size:20px}
-button{background:#1d4ed8;color:#fff;border:none;padding:10px 16px;border-radius:6px;font-size:13px;cursor:pointer;width:100%;margin-top:8px}
-button.green{background:#15803d}
-button.red{background:#dc2626}
-button:active{opacity:.7}
-label{display:block;font-size:11px;color:#94a3b8;margin:8px 0 3px}
-input{width:100%;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:8px;border-radius:4px;font-size:13px}
-.note{font-size:11px;color:#64748b;margin-top:6px}
-</style></head>
+body{font-family:'Manrope',-apple-system,sans-serif;background:var(--bg);color:var(--tx);min-height:100vh}
+.hl{font-family:'Space Grotesk',sans-serif}
+header{background:rgba(252,249,244,.92);backdrop-filter:blur(12px);position:sticky;top:0;z-index:50;border-bottom:1px solid var(--ol)}
+.hi{max-width:920px;margin:auto;display:flex;align-items:center;gap:12px;height:56px;padding:0 20px}
+.brand{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:700;letter-spacing:-.3px;line-height:1.2}
+.brand small{display:block;font-size:10px;font-weight:400;color:var(--mu);letter-spacing:.5px;text-transform:uppercase}
+.pill{display:flex;align-items:center;gap:5px;padding:3px 10px;border-radius:99px;background:#dcfce7;border:1px solid #86efac;font-size:11px;font-weight:700;color:var(--pr);transition:all .3s}
+.pill.off{background:#fee2e2;border-color:#fca5a5;color:var(--er)}
+.sdot{width:7px;height:7px;border-radius:50%;background:var(--pb);flex-shrink:0}
+.pill.off .sdot{background:var(--er)}
+nav{display:flex;gap:2px;margin-left:12px}
+.nb{background:none;border:none;cursor:pointer;font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--mu);padding:6px 12px;border-radius:6px;transition:all .2s}
+.nb.active{background:var(--sh);color:var(--pr)}
+.nb:hover:not(.active){background:var(--sl)}
+.fw{margin-left:auto;font-size:11px;color:var(--mu);font-family:'Space Grotesk',sans-serif}
+main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
+.sec{display:none}.sec.active{display:block}
+.sech{margin-bottom:18px}
+.sech h2{font-size:26px;font-weight:700;letter-spacing:-.5px}
+.slbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--pr);margin-bottom:3px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+@media(max-width:600px){.g2,.g4{grid-template-columns:1fr 1fr}}
+.card{background:var(--wh);border-radius:12px;padding:18px;border:1px solid var(--ol);margin-bottom:14px}
+.clbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--mu);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.clbl::before{content:'';display:inline-block;width:3px;height:13px;background:var(--pb);border-radius:2px}
+.sr{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--sl);font-size:13px}
+.sr:last-child{border:none;padding-bottom:0}
+.sk{color:var(--tv);font-weight:500}
+.sv{font-weight:700;font-family:'Space Grotesk',sans-serif}
+.sv.ok{color:var(--pr)}.sv.bad{color:var(--er)}.sv.bl{color:#0369a1}
+.bs{background:var(--sl);border-radius:8px;padding:12px 14px}
+.bs .lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--mu)}
+.bs .num{font-family:'Space Grotesk',sans-serif;font-size:30px;font-weight:800;line-height:1.1}
+.bs .num.gr{color:var(--pr)}
+.dvd{height:1px;background:var(--ol);margin:14px 0}
+.btn{display:flex;align-items:center;justify-content:space-between;width:100%;padding:13px 16px;border-radius:8px;border:none;cursor:pointer;font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:700;letter-spacing:.2px;transition:all .15s;margin-bottom:8px}
+.btn:last-child{margin-bottom:0}
+.btn:active{transform:scale(.98)}
+.btn-p{background:var(--pr);color:#fff}.btn-p:hover{background:#005321}
+.btn-g{background:#dcfce7;color:var(--pr);border:1px solid #86efac}.btn-g:hover{background:#bbf7d0}
+.btn-w{background:#735a42;color:#fff}.btn-w:hover{background:#5c4534}
+.bi{font-size:17px}
+.fg{margin-bottom:12px}
+.fg label{display:block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--mu);margin-bottom:5px}
+.fg input{width:100%;background:var(--sl);border:1px solid transparent;border-bottom-color:var(--ol);border-radius:6px 6px 0 0;padding:9px 12px;font-family:'Manrope',sans-serif;font-size:13px;font-weight:600;color:var(--tx);outline:none;transition:all .2s}
+.fg input:focus{background:var(--wh);border-bottom-color:var(--pr);border-color:var(--ol)}
+.note{font-size:11px;color:var(--mu);margin-top:8px}
+</style>
+</head>
 <body>
 <header>
-  <div class=dot id=wdot></div>
-  <h1>Tree Marker ALR</h1>
-  <span id=hfw style="font-size:11px;color:#64748b"></span>
+<div class=hi>
+  <div class=brand>Tree Marker ALR<small>Sunraysia Acres</small></div>
+  <div class="pill off" id=spill><div class=sdot></div><span id=slbl>Offline</span></div>
+  <nav>
+    <button class="nb active" onclick="showTab('status',this)">Status</button>
+    <button class=nb onclick="showTab('config',this)">Config</button>
+  </nav>
+  <div class=fw id=hfw></div>
+</div>
 </header>
 <main>
-<div class=tabs>
-  <button class="tab active" onclick="showTab('status',this)">Status</button>
-  <button class=tab onclick="showTab('config',this)">Config</button>
+
+<!-- STATUS -->
+<div id=t-status class="sec active">
+  <div class=sech>
+    <div class=slbl>Live Telemetry</div>
+    <h2 class=hl>System Status</h2>
+  </div>
+  <div class=g2>
+    <div class=card>
+      <div class=clbl>System</div>
+      <div class=sr><span class=sk>WiFi</span><span class="sv ok" id=s-wifi>—</span></div>
+      <div class=sr><span class=sk>IP Address</span><span class="sv bl" id=s-ip>—</span></div>
+      <div class=sr><span class=sk>MQTT</span><span class="sv ok" id=s-mqtt>—</span></div>
+      <div class=sr><span class=sk>GPS Fix</span><span class="sv bad" id=s-gps>—</span></div>
+      <div class=sr><span class=sk>Position</span><span class="sv bl" id=s-pos style="font-size:11px">—</span></div>
+      <div class=sr><span class=sk>Uptime</span><span class=sv id=s-up>—</span></div>
+      <div class=sr><span class=sk>Firmware</span><span class=sv id=s-fw>—</span></div>
+    </div>
+    <div class=card>
+      <div class=clbl>Actions</div>
+      <button class="btn btn-g" onclick=testRelay()><span>Fire Relay (wiring test)</span><span class=bi>&#9889;</span></button>
+      <div class=dvd></div>
+      <div class=clbl>Active Grid</div>
+      <div class=sr><span class=sk>Origin</span><span class="sv bl" id=c-origin style="font-size:11px">—</span></div>
+      <div class=sr><span class=sk>Bearing</span><span class=sv id=c-brg>—</span></div>
+      <div class=sr><span class=sk>Row / Tree spacing</span><span class=sv id=c-spacing>—</span></div>
+      <div class=sr><span class=sk>Grid size</span><span class=sv id=c-grid>—</span></div>
+      <div class=sr><span class=sk>Hit radius</span><span class=sv id=c-hr>—</span></div>
+      <div class=sr><span class=sk>Relay pulse</span><span class=sv id=c-rp>—</span></div>
+    </div>
+  </div>
+  <div class=card>
+    <div class=clbl>Session Statistics</div>
+    <div class=g4>
+      <div class=bs><div class=lbl>Hits</div><div class="num gr" id=s-hits>0</div></div>
+      <div class=bs><div class=lbl>Last Row</div><div class=num id=s-lrow>—</div></div>
+      <div class=bs><div class=lbl>Last Tree</div><div class=num id=s-ltree>—</div></div>
+      <div class=bs><div class=lbl>Last Dist</div><div class=num id=s-ldist style="font-size:20px">—</div></div>
+    </div>
+  </div>
 </div>
 
-<div id=t-status class="section active">
-  <div class=card>
-    <h2>System</h2>
-    <div class=row><span>WiFi</span><span class=val id=s-wifi></span></div>
-    <div class=row><span>IP Address</span><span class=val id=s-ip></span></div>
-    <div class=row><span>MQTT</span><span class=val id=s-mqtt></span></div>
-    <div class=row><span>GPS Fix</span><span class=val id=s-gps></span></div>
-    <div class=row><span>Position</span><span class=val id=s-pos>—</span></div>
-    <div class=row><span>Uptime</span><span class=val id=s-up></span></div>
-    <div class=row><span>Firmware</span><span class=val id=s-fw></span></div>
+<!-- CONFIG -->
+<div id=t-config class=sec>
+  <div class=sech>
+    <div class=slbl>Device Configuration</div>
+    <h2 class=hl>Grid Parameters</h2>
   </div>
   <div class=card>
-    <h2>This Session</h2>
-    <div class=row><span>Hits</span><span class="val hit" id=s-hits>0</span></div>
-    <div class=row><span>Last Row</span><span class=val id=s-lrow>—</span></div>
-    <div class=row><span>Last Tree</span><span class=val id=s-ltree>—</span></div>
-    <div class=row><span>Last distance</span><span class=val id=s-ldist>—</span></div>
+    <div class=clbl>Field Grid</div>
+    <div class=g2>
+      <div class=fg><label>Origin Latitude</label><input id=f-lat type=number step=0.0000001></div>
+      <div class=fg><label>Origin Longitude</label><input id=f-lon type=number step=0.0000001></div>
+      <div class=fg><label>Row Bearing (&#176;) &mdash; 0=N 90=E 180=S</label><input id=f-brg type=number step=0.1></div>
+      <div class=fg><label>Row Spacing (m)</label><input id=f-rs type=number step=0.1></div>
+      <div class=fg><label>Tree Spacing (m)</label><input id=f-ts type=number step=0.1></div>
+      <div class=fg><label>Hit Radius (m)</label><input id=f-hr type=number step=0.01></div>
+      <div class=fg><label>Number of Rows (max 20)</label><input id=f-nr type=number step=1 min=1 max=20></div>
+      <div class=fg><label>Trees per Row (max 100)</label><input id=f-nt type=number step=1 min=1 max=100></div>
+      <div class=fg style="grid-column:1/-1"><label>Relay Pulse (ms)</label><input id=f-rp type=number step=50></div>
+    </div>
+    <button class="btn btn-p" onclick=saveGrid() style="margin-top:6px"><span>Save Grid + Apply Now</span><span class=bi>&#10003;</span></button>
+    <p class=note>Grid rebuilds immediately &mdash; no reboot needed.</p>
   </div>
   <div class=card>
-    <h2>Grid (active)</h2>
-    <div class=row><span>Origin Lat</span><span class=val id=c-lat></span></div>
-    <div class=row><span>Origin Lon</span><span class=val id=c-lon></span></div>
-    <div class=row><span>Row Bearing</span><span class=val id=c-brg></span></div>
-    <div class=row><span>Row Spacing</span><span class=val id=c-rs></span></div>
-    <div class=row><span>Tree Spacing</span><span class=val id=c-ts></span></div>
-    <div class=row><span>Rows x Trees</span><span class=val id=c-grid></span></div>
-    <div class=row><span>Hit Radius</span><span class=val id=c-hr></span></div>
-    <div class=row><span>Relay Pulse</span><span class=val id=c-rp></span></div>
-  </div>
-  <div class=card>
-    <h2>Test</h2>
-    <button class=green onclick=testRelay()>Fire Relay (wiring test)</button>
-  </div>
-</div>
-
-<div id=t-config class=section>
-  <div class=card>
-    <h2>Grid Parameters</h2>
-    <label>Origin Latitude</label><input id=f-lat type=number step=0.0000001>
-    <label>Origin Longitude</label><input id=f-lon type=number step=0.0000001>
-    <label>Row Bearing (deg: 0=N 90=E 180=S 270=W)</label><input id=f-brg type=number step=0.1>
-    <label>Row Spacing (m)</label><input id=f-rs type=number step=0.1>
-    <label>Tree Spacing (m)</label><input id=f-ts type=number step=0.1>
-    <label>Number of Rows</label><input id=f-nr type=number step=1 min=1 max=20>
-    <label>Trees per Row</label><input id=f-nt type=number step=1 min=1 max=100>
-    <label>Hit Radius (m)</label><input id=f-hr type=number step=0.01>
-    <label>Relay Pulse (ms)</label><input id=f-rp type=number step=50>
-    <button onclick=saveGrid()>Save Grid + Apply Now</button>
-    <p class=note>Grid rebuilds immediately — no reboot needed.</p>
-  </div>
-  <div class=card>
-    <h2>WiFi (requires reboot)</h2>
-    <label>Network Name (SSID)</label><input id=f-ssid type=text>
-    <label>Password</label><input id=f-wpass type=password placeholder="(unchanged if blank)">
-    <button class=red onclick=saveWifi()>Save WiFi + Reboot</button>
+    <div class=clbl>Network (requires reboot)</div>
+    <div class=g2>
+      <div class=fg><label>Network Name (SSID)</label><input id=f-ssid type=text></div>
+      <div class=fg><label>Password</label><input id=f-wpass type=password placeholder="(leave blank to keep current)"></div>
+    </div>
+    <button class="btn btn-w" onclick=saveWifi()><span>Save WiFi + Reboot</span><span class=bi>&#8635;</span></button>
     <p class=note>Board will reconnect to new network after reboot.</p>
   </div>
 </div>
+
 </main>
 <script>
 function showTab(t,btn){
-  document.querySelectorAll('.section').forEach(e=>e.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+  document.querySelectorAll('.sec').forEach(e=>e.classList.remove('active'));
+  document.querySelectorAll('.nb').forEach(e=>e.classList.remove('active'));
   document.getElementById('t-'+t).classList.add('active');
   btn.classList.add('active');
 }
 function uptime(s){return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m '+s%60+'s'}
+function setv(id,txt,cls){const e=document.getElementById(id);if(e){e.textContent=txt;if(cls!==undefined)e.className='sv '+(cls?'ok':'bad');}}
 function poll(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
     const ok=d.wifi,mo=d.mqtt,go=d.fix;
-    document.getElementById('wdot').className='dot'+(ok?' ok':'');
-    set('s-wifi',ok?'Connected':'Disconnected',ok);
-    set('s-ip',d.ip,true);
-    set('s-mqtt',mo?'Connected':'Disconnected',mo);
-    set('s-gps',go?'RTK Fix':'No Fix',go);
+    const p=document.getElementById('spill');
+    p.className='pill'+(ok?'':' off');
+    document.getElementById('slbl').textContent=ok?'Online':'Offline';
+    setv('s-wifi',ok?'Connected':'Disconnected',ok);
+    setv('s-ip',d.ip,true);
+    setv('s-mqtt',mo?'Connected':'Disconnected',mo);
+    setv('s-gps',go?'RTK Fix':'No Fix',go);
     document.getElementById('s-pos').textContent=go?d.lat.toFixed(7)+', '+d.lon.toFixed(7):'—';
     document.getElementById('s-up').textContent=uptime(d.uptime);
     document.getElementById('s-fw').textContent='v'+d.fw;
-    document.getElementById('hfw').textContent='v'+d.fw;
+    document.getElementById('hfw').textContent='fw v'+d.fw;
     document.getElementById('s-hits').textContent=d.hits;
-    document.getElementById('s-lrow').textContent=d.lastRow>=0?'Row '+d.lastRow:'—';
-    document.getElementById('s-ltree').textContent=d.lastTree>=0?'Tree '+d.lastTree:'—';
-    document.getElementById('s-ldist').textContent=d.lastDist>0?d.lastDist.toFixed(3)+' m':'—';
+    document.getElementById('s-lrow').textContent=d.lastRow>=0?d.lastRow:'—';
+    document.getElementById('s-ltree').textContent=d.lastTree>=0?d.lastTree:'—';
+    document.getElementById('s-ldist').textContent=d.lastDist>0?d.lastDist.toFixed(3)+'m':'—';
     const c=d.cfg;
-    document.getElementById('c-lat').textContent=c.lat.toFixed(7);
-    document.getElementById('c-lon').textContent=c.lon.toFixed(7);
+    document.getElementById('c-origin').textContent=c.lat.toFixed(7)+', '+c.lon.toFixed(7);
     document.getElementById('c-brg').textContent=c.brg+'\u00b0';
-    document.getElementById('c-rs').textContent=c.rs+' m';
-    document.getElementById('c-ts').textContent=c.ts+' m';
-    document.getElementById('c-grid').textContent=c.rows+' x '+c.trees;
+    document.getElementById('c-spacing').textContent=c.rs+'m / '+c.ts+'m';
+    document.getElementById('c-grid').textContent=c.rows+' \u00d7 '+c.trees;
     document.getElementById('c-hr').textContent=c.hr+' m';
     document.getElementById('c-rp').textContent=c.rp+' ms';
     document.getElementById('f-lat').value=c.lat;
@@ -305,14 +349,7 @@ function poll(){
     document.getElementById('f-ssid').value=c.ssid;
   }).catch(()=>{});
 }
-function set(id,txt,ok){
-  const e=document.getElementById(id);
-  e.textContent=txt;
-  e.className='val '+(ok?'ok':'bad');
-}
-function testRelay(){
-  fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired for '+document.getElementById('c-rp').textContent));
-}
+function testRelay(){fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));}
 function saveGrid(){
   const b={lat:+document.getElementById('f-lat').value,lon:+document.getElementById('f-lon').value,
     brg:+document.getElementById('f-brg').value,rs:+document.getElementById('f-rs').value,
@@ -328,8 +365,7 @@ function saveWifi(){
   if(!ssid){alert('SSID cannot be empty');return;}
   if(!confirm('Save WiFi "'+ssid+'" and reboot?'))return;
   fetch('/config/wifi',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ssid:ssid,pass:pass})})
-    .then(r=>r.text()).then(t=>alert(t));
+    body:JSON.stringify({ssid:ssid,pass:pass})}).then(r=>r.text()).then(t=>alert(t));
 }
 poll();setInterval(poll,2000);
 </script>
