@@ -33,7 +33,7 @@ jobs:
       - name: Install ESP32 core
         run: |
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          arduino-cli core install esp32:esp32@2.0.17
 
       - name: Install libraries
         run: |
