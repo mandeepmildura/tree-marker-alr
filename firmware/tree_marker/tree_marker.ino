@@ -10,7 +10,6 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiUDP.h>
 #include <WiFiClientSecure.h>
 #include <HTTPUpdate.h>
 #include <PubSubClient.h>
