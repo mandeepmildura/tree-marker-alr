@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where arduino-cli:*)",
+      "Read(//c/Users/msgil/AppData/Local/Arduino15//**)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Users/msgil/**)"
+    ]
+  }
+}
