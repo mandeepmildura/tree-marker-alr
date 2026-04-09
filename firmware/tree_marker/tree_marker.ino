@@ -20,7 +20,7 @@
 #include <Preferences.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.2.4"
+#define FW_VERSION "1.2.5"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -813,9 +813,15 @@ void loop() {
   if (pkt > 0) {
     uint8_t buf[256];
     int len = udp.read(buf, sizeof(buf) - 1);
+    // DEBUG: dump first 20 bytes of every UDP packet
+    Serial.printf("[UDP] len=%d from %s:%d  bytes:", len,
+                  udp.remoteIP().toString().c_str(), udp.remotePort());
+    for (int i = 0; i < min(len, 20); i++) Serial.printf(" %02X", buf[i]);
+    Serial.println();
     double lat, lon;
     if (parsePGN200(buf, len, lat, lon)) {
       // Binary AgIO PGN 200
+      Serial.printf("[PGN200] lat=%.7f lon=%.7f\n", lat, lon);
       gpsFix = true; curLat = lat; curLon = lon;
       lastFixMs = millis();
       checkGrid(lat, lon);
