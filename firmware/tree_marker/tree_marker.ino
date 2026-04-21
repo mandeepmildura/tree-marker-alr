@@ -123,6 +123,15 @@ bool   gHasLines  = false;        // true once both AB lines are selected
 // re-uploading. Persisted in NVS as "ab_raw" (<=3800 chars).
 String gAbLinesRaw;
 
+// AB-mode geometry (declared up here so loadPrefs can populate them).
+struct IPt { float e; float n; };
+IPt  intersections[MAX_INTERSECTIONS];
+int  numIntersections = 0;
+IPt  boundary[MAX_BOUNDARY];
+int  numBoundary = 0;
+bool gHasBoundary = false;
+int  lastRawIntersections = 0;  // pre-boundary-clip count, for UI
+
 Preferences prefs;
 
 void loadPrefs() {
@@ -244,17 +253,8 @@ double bearingRad, perpBearingRad;
 struct Point { double lat; double lon; };
 Point grid[20][100];   // [row][tree]  max 20x100
 
-// AB-mode intersection store (declared here so checkGrid() can reference it).
-struct IPt { float e; float n; };
-IPt  intersections[MAX_INTERSECTIONS];
-int  numIntersections = 0;
-
-// Boundary polygon (AOG Boundary.txt → local E/N). Intersections outside
-// the polygon are dropped during buildAbIntersections so they never fire.
-IPt  boundary[MAX_BOUNDARY];
-int  numBoundary = 0;
-bool gHasBoundary = false;
-int  lastRawIntersections = 0;  // count before boundary clip (for UI)
+// (intersections[], boundary[], IPt, counts — all declared up top near
+// the global config so loadPrefs() can populate them on boot.)
 
 // Ring buffer of the last 20 fires — for the dashboard "Recent Hits" card
 // and field calibration. Ephemeral (cleared on reboot).
