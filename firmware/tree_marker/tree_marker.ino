@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.4"
+#define FW_VERSION "1.4.5"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -44,6 +44,11 @@
 #define DEF_NUM_TREES     50
 #define DEF_HIT_RADIUS    0.35
 #define DEF_RELAY_PULSE   600
+
+// Antenna → nozzle offset (v1.4.5). Both default to 0 so existing
+// setups behave identically to v1.4.4 until calibrated.
+#define DEF_FORE_AFT      0.0       // metres: positive = nozzle BEHIND antenna
+#define DEF_LATERAL       0.0       // metres: positive = nozzle RIGHT of antenna centreline
 
 // ── Grid mode ─────────────────────────────────────────────────
 #define MODE_SIMPLE  0      // origin + bearing + spacings (bench/sim)
@@ -106,6 +111,11 @@ int    gNumTrees;
 double gHitRadius;
 int    gRelayPulse;
 int    gUdpPort;
+double gForeAft;         // + = nozzle behind antenna
+double gLateral;         // + = nozzle right of centreline
+double gHeading = 0;     // degrees, computed from consecutive fixes
+double prevFixLat = 0, prevFixLon = 0;
+bool   hasPrevFix = false;
 
 // ── AB-mode state (loaded from NVS) ───────────────────────────
 int    gGridMode;                 // MODE_SIMPLE or MODE_AB
@@ -152,6 +162,8 @@ void loadPrefs() {
   gHitRadius   = prefs.getDouble("hit_radius",  DEF_HIT_RADIUS);
   gRelayPulse  = prefs.getInt(   "relay_pulse", DEF_RELAY_PULSE);
   gUdpPort     = prefs.getInt(   "udp_port",    UDP_PORT);
+  gForeAft     = prefs.getDouble("fore_aft",    DEF_FORE_AFT);
+  gLateral     = prefs.getDouble("lateral",     DEF_LATERAL);
 
   // AB-mode state
   gGridMode = prefs.getInt("grid_mode", MODE_SIMPLE);
@@ -223,6 +235,8 @@ void saveGridPrefs() {
   prefs.putInt(   "num_trees",   gNumTrees);
   prefs.putDouble("hit_radius",  gHitRadius);
   prefs.putInt(   "relay_pulse", gRelayPulse);
+  prefs.putDouble("fore_aft",    gForeAft);
+  prefs.putDouble("lateral",     gLateral);
   prefs.end();
 }
 
@@ -259,7 +273,7 @@ Point grid[20][100];   // [row][tree]  max 20x100
 // Ring buffer of the last 20 fires — for the dashboard "Recent Hits" card
 // and field calibration. Ephemeral (cleared on reboot).
 #define HIT_LOG_CAP 20
-struct HitLog { int row; int tree; float dist; double lat; double lon; unsigned long ms; };
+struct HitLog { int row; int tree; float dist; double lat; double lon; float heading; unsigned long ms; };
 HitLog hitLog[HIT_LOG_CAP];
 int    hitLogHead  = 0;   // next write slot (oldest gets overwritten)
 int    hitLogCount = 0;
@@ -404,6 +418,8 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
       <div class=sr><span class=sk>Relay pulse</span><span class=sv id=c-rp>&mdash;</span></div>
       <div class=sr><span class=sk>Mode</span><span class=sv id=c-mode>&mdash;</span></div>
       <div class=sr><span class=sk>Intersections</span><span class=sv id=c-ni>&mdash;</span></div>
+      <div class=sr><span class=sk>Heading</span><span class=sv id=c-hdg>&mdash;</span></div>
+      <div class=sr><span class=sk>Nozzle offset</span><span class=sv id=c-off style="font-size:11px">&mdash;</span></div>
     </div>
   </div>
   <div class=card>
@@ -416,7 +432,9 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     </div>
   </div>
   <div class=card>
-    <div class=clbl>Recent Hits <span style="color:var(--mu);font-weight:400;font-size:9px;margin-left:6px;letter-spacing:1px">LIVE · LAST 20</span></div>
+    <div class=clbl>Recent Hits <span style="color:var(--mu);font-weight:400;font-size:9px;margin-left:6px;letter-spacing:1px">LIVE · LAST 20</span>
+      <a href="/api/hits?csv=1" download="tree-marker-hits.csv" style="float:right;font-size:10px;font-weight:700;color:var(--pr);text-decoration:none">⬇ CSV</a>
+    </div>
     <div id=hitlog style="max-height:260px;overflow-y:auto;font-family:'Space Grotesk',sans-serif;font-size:12px">
       <div style="color:var(--mu);padding:10px 0">No hits yet.</div>
     </div>
@@ -499,6 +517,15 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     </div>
     <button class="btn btn-p" onclick=saveGrid() style="margin-top:6px"><span>Save Grid + Apply Now</span><span class=bi>&#10003;</span></button>
     <p class=note>Grid rebuilds immediately &mdash; no reboot needed.</p>
+  </div>
+  <div class=card>
+    <div class=clbl>Antenna &rarr; Nozzle Offset</div>
+    <div class=g2>
+      <div class=fg><label>Fore/Aft (m) &mdash; positive = BEHIND antenna</label><input id=f-fa type=number step=0.01></div>
+      <div class=fg><label>Lateral (m) &mdash; positive = RIGHT of antenna</label><input id=f-latoff type=number step=0.01></div>
+    </div>
+    <button class="btn btn-p" onclick=saveGrid()><span>Save Offset + Apply</span><span class=bi>&#10003;</span></button>
+    <p class=note>Bidirectional calibration: drive the same row both ways, measure the distance between marks, divide by 2 &mdash; that's your residual error. Adjust fore/aft (or lateral) and retest until marks land on top of each other. Current heading is shown on the Status tab.</p>
   </div>
   <div class=card>
     <div class=clbl>Network (requires reboot)</div>
@@ -689,12 +716,12 @@ var setMode=(m)=>{
 var _formFilled=false;
 var fillForm=(c)=>{
   if(!c||!c.lat)return;
-  ['f-lat','f-lon','f-brg','f-rs','f-ts','f-nr','f-nt','f-hr','f-rp','f-ssid','f-udp'].forEach(id=>{
+  ['f-lat','f-lon','f-brg','f-rs','f-ts','f-nr','f-nt','f-hr','f-rp','f-ssid','f-udp','f-fa','f-latoff'].forEach(id=>{
     var el=document.getElementById(id);if(!el)return;
     var key=({'f-lat':'lat','f-lon':'lon','f-brg':'brg','f-rs':'rs','f-ts':'ts',
               'f-nr':'rows','f-nt':'trees','f-hr':'hr','f-rp':'rp',
-              'f-ssid':'ssid','f-udp':'udp'})[id];
-    el.value=c[key];
+              'f-ssid':'ssid','f-udp':'udp','f-fa':'fa','f-latoff':'lat_off'})[id];
+    if(c[key]!==undefined)el.value=c[key];
   });
   _formFilled=true;
 };
@@ -727,6 +754,9 @@ var poll=()=>{
     document.getElementById('c-rp').textContent=c.rp+' ms';
     document.getElementById('c-mode').textContent=c.mode===1?'AB':'Simple';
     document.getElementById('c-ni').textContent=c.nInt;
+    document.getElementById('c-hdg').textContent=(d.hdg!==undefined?d.hdg.toFixed(1)+'°':'—');
+    document.getElementById('c-off').textContent=
+      'F/A '+(c.fa!==undefined?c.fa.toFixed(2):0)+'m, Lat '+(c.lat_off!==undefined?c.lat_off.toFixed(2):0)+'m';
     window._cfg=c;
     if(!_formFilled)fillForm(c);
     // Refresh hit log when count changes or once on initial load.
@@ -737,11 +767,13 @@ var poll=()=>{
 };
 var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
 var saveGrid=()=>{
-  const b={lat:+document.getElementById('f-lat').value,lon:+document.getElementById('f-lon').value,
-    brg:+document.getElementById('f-brg').value,rs:+document.getElementById('f-rs').value,
-    ts:+document.getElementById('f-ts').value,nr:+document.getElementById('f-nr').value,
-    nt:+document.getElementById('f-nt').value,hr:+document.getElementById('f-hr').value,
-    rp:+document.getElementById('f-rp').value};
+  var num=(id)=>+document.getElementById(id).value;
+  const b={lat:num('f-lat'),lon:num('f-lon'),brg:num('f-brg'),
+    rs:num('f-rs'),ts:num('f-ts'),nr:num('f-nr'),nt:num('f-nt'),
+    hr:num('f-hr'),rp:num('f-rp')};
+  var fa=document.getElementById('f-fa'),lo=document.getElementById('f-latoff');
+  if(fa&&fa.value!=='')b.fa=+fa.value;
+  if(lo&&lo.value!=='')b.lat_off=+lo.value;
   fetch('/config/grid',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})
     .then(r=>r.text()).then(t=>{alert(t);poll();});
 };
@@ -908,6 +940,45 @@ bool parseGGA(const char* s, double& lat, double& lon) {
   return true;
 }
 
+// ── Heading from consecutive fixes + antenna→nozzle offset ───
+// Updates gHeading whenever we get a fix that moved at least 2 cm
+// (below that, the direction would be dominated by GPS noise).
+// Offset is applied by rotating a (fore_aft, lateral) vector into
+// the world frame and shifting the check position accordingly.
+void updateHeading(double lat, double lon) {
+  if (hasPrevFix) {
+    double dLat = lat - prevFixLat;
+    double dLon = lon - prevFixLon;
+    double mPerLon = M_PER_DEG_LAT * cos(lat * M_PI / 180.0);
+    double dN = dLat * M_PER_DEG_LAT;
+    double dE = dLon * mPerLon;
+    if (sqrt(dN*dN + dE*dE) > 0.02) {
+      double hdg = atan2(dE, dN) * 180.0 / M_PI;
+      if (hdg < 0) hdg += 360.0;
+      gHeading = hdg;
+    }
+  }
+  prevFixLat = lat; prevFixLon = lon; hasPrevFix = true;
+}
+
+// Shifts the antenna position to the nozzle position in world frame.
+// Convention:
+//   gForeAft > 0  → nozzle is BEHIND the antenna (opposite heading direction)
+//   gLateral > 0  → nozzle is RIGHT of centreline
+// Heading h is in degrees, 0=N, 90=E, 180=S, 270=W.
+void applyNozzleOffset(double lat, double lon, double& nozLat, double& nozLon) {
+  if (gForeAft == 0.0 && gLateral == 0.0) {
+    nozLat = lat; nozLon = lon; return;
+  }
+  double h = gHeading * M_PI / 180.0;
+  // Forward unit vector (sin h, cos h); right unit vector (cos h, -sin h).
+  double dE = -gForeAft * sin(h) + gLateral * cos(h);
+  double dN = -gForeAft * cos(h) - gLateral * sin(h);
+  double mPerLon = M_PER_DEG_LAT * cos(lat * M_PI / 180.0);
+  nozLat = lat + dN / M_PER_DEG_LAT;
+  nozLon = lon + dE / mPerLon;
+}
+
 // ── Flat-earth distance ────────────────────────────────────────
 double distM(double lat1, double lon1, double lat2, double lon2) {
   double dLat = (lat2 - lat1) * M_PER_DEG_LAT;
@@ -1007,7 +1078,7 @@ void checkGrid(double lat, double lon) {
     Serial.printf("HIT  Row %-2d  Tree %-3d  closest=%.3fm\n",
                   nearR, nearT, approachMinD);
 
-    hitLog[hitLogHead] = { nearR, nearT, (float)approachMinD, lat, lon, millis() };
+    hitLog[hitLogHead] = { nearR, nearT, (float)approachMinD, lat, lon, (float)gHeading, millis() };
     hitLogHead = (hitLogHead + 1) % HIT_LOG_CAP;
     if (hitLogCount < HIT_LOG_CAP) hitLogCount++;
 
@@ -1472,29 +1543,31 @@ void handleRoot() {
 }
 
 void handleStatus() {
-  char json[640];
+  char json[800];
   snprintf(json, sizeof(json),
     "{\"wifi\":%s,\"mqtt\":%s,\"fix\":%s,"
     "\"ip\":\"%s\",\"fw\":\"%s\",\"uptime\":%lu,"
     "\"hits\":%d,\"lastRow\":%d,\"lastTree\":%d,\"lastDist\":%.3f,"
-    "\"lat\":%.7f,\"lon\":%.7f,"
+    "\"lat\":%.7f,\"lon\":%.7f,\"hdg\":%.1f,"
     "\"cfg\":{\"lat\":%.7f,\"lon\":%.7f,\"brg\":%.1f,"
     "\"rs\":%.1f,\"ts\":%.1f,\"rows\":%d,\"trees\":%d,"
     "\"hr\":%.2f,\"rp\":%d,\"ssid\":\"%s\",\"udp\":%d,"
-    "\"mode\":%d,\"nInt\":%d,\"hasField\":%s,\"hasLines\":%s}}",
+    "\"mode\":%d,\"nInt\":%d,\"hasField\":%s,\"hasLines\":%s,"
+    "\"fa\":%.2f,\"lat_off\":%.2f}}",
     WiFi.status()==WL_CONNECTED?"true":"false",
     mqtt.connected()?"true":"false",
     gpsFix?"true":"false",
     WiFi.localIP().toString().c_str(),
     FW_VERSION, millis()/1000,
     totalHits, lastRow, lastTree, lastDist,
-    curLat, curLon,
+    curLat, curLon, gHeading,
     gOriginLat, gOriginLon, gRowBearing,
     gRowSpacing, gTreeSpacing, gNumRows, gNumTrees,
     gHitRadius, gRelayPulse, gWifiSsid, gUdpPort,
     gGridMode, numIntersections,
     gHasField ? "true" : "false",
-    gHasLines ? "true" : "false"
+    gHasLines ? "true" : "false",
+    gForeAft, gLateral
   );
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
   webServer.send(200, "application/json", json);
@@ -1542,6 +1615,9 @@ void handleConfigGrid() {
   gNumTrees    = (int)jsonFloat(body, "nt");
   gHitRadius   = jsonFloat(body, "hr");
   gRelayPulse  = (int)jsonFloat(body, "rp");
+  // Optional nozzle offset (absent = leave unchanged, not zero)
+  if (body.indexOf("\"fa\"") >= 0)      gForeAft = jsonFloat(body, "fa");
+  if (body.indexOf("\"lat_off\"") >= 0) gLateral = jsonFloat(body, "lat_off");
 
   // Clamp to safe grid array bounds
   if (gNumRows  < 1)  gNumRows  = 1;
@@ -1906,19 +1982,40 @@ void handleGrid() {
   webServer.send(200, "application/json", out);
 }
 
-// GET /api/hits — last 20 fires, newest first
+// GET /api/hits — last 20 fires, newest first. Supports ?csv=1 for
+// calibration use: drives a spreadsheet-friendly export with heading
+// so you can average forward-pass vs return-pass marks to compute the
+// residual antenna→nozzle offset error.
 void handleHits() {
-  String out; out.reserve(1600);
-  out = "[";
+  bool csv = webServer.hasArg("csv");
+  String out; out.reserve(2200);
   unsigned long now = millis();
+  if (csv) {
+    out = "row,tree,dist,lat,lon,heading,age_s\n";
+    for (int i = 0; i < hitLogCount; i++) {
+      int idx = (hitLogHead - 1 - i + HIT_LOG_CAP) % HIT_LOG_CAP;
+      const HitLog& h = hitLog[idx];
+      unsigned long ageS = (now - h.ms) / 1000UL;
+      char buf[160];
+      snprintf(buf, sizeof(buf),
+        "%d,%d,%.3f,%.7f,%.7f,%.1f,%lu\n",
+        h.row, h.tree, h.dist, h.lat, h.lon, h.heading, ageS);
+      out += buf;
+    }
+    webServer.sendHeader("Content-Disposition", "attachment; filename=tree-marker-hits.csv");
+    webServer.sendHeader("Access-Control-Allow-Origin", "*");
+    webServer.send(200, "text/csv", out);
+    return;
+  }
+  out = "[";
   for (int i = 0; i < hitLogCount; i++) {
     int idx = (hitLogHead - 1 - i + HIT_LOG_CAP) % HIT_LOG_CAP;
     const HitLog& h = hitLog[idx];
     unsigned long ageS = (now - h.ms) / 1000UL;
-    char buf[180];
+    char buf[220];
     snprintf(buf, sizeof(buf),
-      "%s{\"row\":%d,\"tree\":%d,\"dist\":%.3f,\"lat\":%.7f,\"lon\":%.7f,\"age\":%lu}",
-      i ? "," : "", h.row, h.tree, h.dist, h.lat, h.lon, ageS);
+      "%s{\"row\":%d,\"tree\":%d,\"dist\":%.3f,\"lat\":%.7f,\"lon\":%.7f,\"hdg\":%.1f,\"age\":%lu}",
+      i ? "," : "", h.row, h.tree, h.dist, h.lat, h.lon, h.heading, ageS);
     out += buf;
   }
   out += "]";
@@ -2120,7 +2217,10 @@ void loop() {
       // AOG NAV PGN 100 — works in RTK and simulator mode
       gpsFix = true; curLat = lat; curLon = lon;
       lastFixMs = millis();
-      checkGrid(lat, lon);
+      updateHeading(lat, lon);
+      double nozLat, nozLon;
+      applyNozzleOffset(lat, lon, nozLat, nozLon);
+      checkGrid(nozLat, nozLon);
     } else {
       // Fallback: NMEA text ($GNGGA / $GPGGA) if AgIO NMEA-out enabled
       buf[len] = '\0';
@@ -2129,7 +2229,10 @@ void loop() {
         if (parseGGA(line, lat, lon)) {
           gpsFix = true; curLat = lat; curLon = lon;
           lastFixMs = millis();
-          checkGrid(lat, lon);
+          updateHeading(lat, lon);
+          double nozLat, nozLon;
+          applyNozzleOffset(lat, lon, nozLat, nozLon);
+          checkGrid(nozLat, nozLon);
         }
         line = strtok(nullptr, "\r\n");
       }
