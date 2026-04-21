@@ -1680,21 +1680,20 @@ void handleFieldApply() {
 // GET /api/grid — planned tree positions as lat/lon, either from
 // the Simple grid[][] or from intersections[] in AB mode. Designed
 // for the dashboard Map tab to plot without needing its own maths.
-// Responds with streaming chunks for large grids (up to 2000 points).
+// Builds the full response string in memory first (up to ~30KB at
+// MAX_INTERSECTIONS=2000) — chunked streaming was flaky with many
+// small sendContent calls, and we have plenty of RAM.
 void handleGrid() {
-  webServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webServer.sendHeader("Cache-Control", "no-cache");
-  webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  webServer.send(200, "application/json", "");
-
+  String out;
+  out.reserve(32768);
   char head[96];
   snprintf(head, sizeof(head),
     "{\"mode\":%d,\"rows\":%d,\"trees\":%d,\"points\":[",
     gGridMode, gNumRows, gNumTrees);
-  webServer.sendContent(head);
+  out += head;
 
   bool first = true;
-  char buf[80];
+  char buf[72];
 
   if (gGridMode == MODE_AB && gHasLines && gHasField) {
     for (int i = 0; i < numIntersections; i++) {
@@ -1702,24 +1701,26 @@ void handleGrid() {
       localToLatLon(intersections[i].e, intersections[i].n, lat, lon);
       int r = i / gNumTrees;
       int t = i % gNumTrees;
-      snprintf(buf, sizeof(buf), "%s[%.7f,%.7f,%d,%d]",
-               first ? "" : ",", lat, lon, r, t);
-      webServer.sendContent(buf);
+      int n = snprintf(buf, sizeof(buf), "%s[%.7f,%.7f,%d,%d]",
+                       first ? "" : ",", lat, lon, r, t);
+      out.concat(buf, n);
       first = false;
     }
   } else {
     for (int r = 0; r < gNumRows; r++) {
       for (int t = 0; t < gNumTrees; t++) {
-        snprintf(buf, sizeof(buf), "%s[%.7f,%.7f,%d,%d]",
-                 first ? "" : ",", grid[r][t].lat, grid[r][t].lon, r, t);
-        webServer.sendContent(buf);
+        int n = snprintf(buf, sizeof(buf), "%s[%.7f,%.7f,%d,%d]",
+                         first ? "" : ",", grid[r][t].lat, grid[r][t].lon, r, t);
+        out.concat(buf, n);
         first = false;
       }
     }
   }
 
-  webServer.sendContent("]}");
-  webServer.sendContent("");  // end chunked stream
+  out += "]}";
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webServer.sendHeader("Cache-Control", "no-cache");
+  webServer.send(200, "application/json", out);
 }
 
 // GET /api/hits — last 20 fires, newest first
