@@ -228,6 +228,11 @@ struct IPt { float e; float n; };
 IPt  intersections[MAX_INTERSECTIONS];
 int  numIntersections = 0;
 
+// Forward decl — full definition lives further down next to the rest
+// of the AB-mode helpers. Needed because checkGrid() is above them
+// and Arduino's auto-prototyping isn't picking it up.
+void latLonToLocal(double lat, double lon, double& localE, double& localN);
+
 // ── State ─────────────────────────────────────────────────────
 bool   relayActive    = false;
 unsigned long relayStart    = 0;
