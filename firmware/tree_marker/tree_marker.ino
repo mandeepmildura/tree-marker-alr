@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.0"
+#define FW_VERSION "1.4.1"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -228,6 +228,14 @@ struct IPt { float e; float n; };
 IPt  intersections[MAX_INTERSECTIONS];
 int  numIntersections = 0;
 
+// Ring buffer of the last 20 fires — for the dashboard "Recent Hits" card
+// and field calibration. Ephemeral (cleared on reboot).
+#define HIT_LOG_CAP 20
+struct HitLog { int row; int tree; float dist; double lat; double lon; unsigned long ms; };
+HitLog hitLog[HIT_LOG_CAP];
+int    hitLogHead  = 0;   // next write slot (oldest gets overwritten)
+int    hitLogCount = 0;
+
 // Forward decl — full definition lives further down next to the rest
 // of the AB-mode helpers. Needed because checkGrid() is above them
 // and Arduino's auto-prototyping isn't picking it up.
@@ -368,6 +376,12 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
       <div class=bs><div class=lbl>Last Dist</div><div class=num id=s-ldist style="font-size:20px">—</div></div>
     </div>
   </div>
+  <div class=card>
+    <div class=clbl>Recent Hits <span style="color:var(--mu);font-weight:400;font-size:9px;margin-left:6px;letter-spacing:1px">LIVE · LAST 20</span></div>
+    <div id=hitlog style="max-height:260px;overflow-y:auto;font-family:'Space Grotesk',sans-serif;font-size:12px">
+      <div style="color:var(--mu);padding:10px 0">No hits yet.</div>
+    </div>
+  </div>
 </div>
 
 <!-- FIELD -->
@@ -461,6 +475,25 @@ var showTab=(t,btn)=>{
   btn.classList.add('active');
   if(t==='config')fillForm(window._cfg||{});
   if(t==='field')fetchField();
+  if(t==='status')fetchHits();
+};
+var _lastHitCount=-1;
+var fetchHits=()=>{
+  fetch('/api/hits').then(r=>r.json()).then(rows=>{
+    var el=document.getElementById('hitlog');
+    if(!rows.length){el.innerHTML='<div style="color:var(--mu);padding:10px 0">No hits yet.</div>';return;}
+    var age=(s)=>s<60?s+'s ago':Math.floor(s/60)+'m '+(s%60)+'s ago';
+    var html='';
+    rows.forEach((h,i)=>{
+      var bg=i===0?'background:#dcfce7':'background:'+(i%2?'var(--sl)':'transparent');
+      html+='<div style="display:flex;justify-content:space-between;padding:7px 10px;border-bottom:1px solid var(--sl);'+bg+'">'+
+        '<span style="font-weight:700;color:var(--pr)">R'+h.row+' T'+h.tree+'</span>'+
+        '<span style="color:var(--tv)">'+h.dist.toFixed(3)+' m</span>'+
+        '<span style="color:var(--mu);font-size:11px">'+age(h.age)+'</span>'+
+        '</div>';
+    });
+    el.innerHTML=html;
+  }).catch(()=>{});
 };
 var fetchField=()=>{
   fetch('/field/state').then(r=>r.json()).then(d=>{
@@ -554,6 +587,8 @@ var poll=()=>{
     document.getElementById('c-ni').textContent=c.nInt;
     window._cfg=c;
     if(!_formFilled)fillForm(c);
+    // Refresh hit log when count changes or once on initial load.
+    if(d.hits!==_lastHitCount){_lastHitCount=d.hits;fetchHits();}
   }).catch(()=>{});
 };
 var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
@@ -792,6 +827,11 @@ void checkGrid(double lat, double lon) {
   totalHits++;
 
   Serial.printf("HIT  Row %-2d  Tree %-3d  %.3fm\n", nearR, nearT, nearD);
+
+  // Record in the ring buffer for the dashboard
+  hitLog[hitLogHead] = { nearR, nearT, (float)nearD, lat, lon, millis() };
+  hitLogHead = (hitLogHead + 1) % HIT_LOG_CAP;
+  if (hitLogCount < HIT_LOG_CAP) hitLogCount++;
 
   char payload[80];
   snprintf(payload, sizeof(payload),
@@ -1501,6 +1541,26 @@ void handleFieldApply() {
   webServer.send(200, "application/json", out);
 }
 
+// GET /api/hits — last 20 fires, newest first
+void handleHits() {
+  String out; out.reserve(1600);
+  out = "[";
+  unsigned long now = millis();
+  for (int i = 0; i < hitLogCount; i++) {
+    int idx = (hitLogHead - 1 - i + HIT_LOG_CAP) % HIT_LOG_CAP;
+    const HitLog& h = hitLog[idx];
+    unsigned long ageS = (now - h.ms) / 1000UL;
+    char buf[180];
+    snprintf(buf, sizeof(buf),
+      "%s{\"row\":%d,\"tree\":%d,\"dist\":%.3f,\"lat\":%.7f,\"lon\":%.7f,\"age\":%lu}",
+      i ? "," : "", h.row, h.tree, h.dist, h.lat, h.lon, ageS);
+    out += buf;
+  }
+  out += "]";
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webServer.send(200, "application/json", out);
+}
+
 // GET /field/state — what the dashboard Field tab shows
 void handleFieldState() {
   char names[256];
@@ -1605,6 +1665,7 @@ void setup() {
   webServer.on("/setup",       HTTP_GET,  handleSetup);
   webServer.on("/scan",        HTTP_GET,  handleScan);
   webServer.on("/api/status",  HTTP_GET,  handleStatus);
+  webServer.on("/api/hits",    HTTP_GET,  handleHits);
   webServer.on("/relay",       HTTP_POST, handleRelay);
   webServer.on("/config/grid", HTTP_POST, handleConfigGrid);
   webServer.on("/config/wifi", HTTP_POST, handleConfigWifi);
