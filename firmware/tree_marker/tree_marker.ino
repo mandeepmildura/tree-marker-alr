@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.1"
+#define FW_VERSION "1.4.2"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -236,10 +236,13 @@ HitLog hitLog[HIT_LOG_CAP];
 int    hitLogHead  = 0;   // next write slot (oldest gets overwritten)
 int    hitLogCount = 0;
 
-// Forward decl — full definition lives further down next to the rest
-// of the AB-mode helpers. Needed because checkGrid() is above them
-// and Arduino's auto-prototyping isn't picking it up.
+// Forward decls — full definitions live further down next to the rest
+// of the AB-mode helpers. Needed because checkGrid() / handleGrid() are
+// above them and Arduino's auto-prototyping isn't reliable with
+// reference parameters.
 void latLonToLocal(double lat, double lon, double& localE, double& localN);
+void localToLatLon(double localE, double localN, double& lat, double& lon);
+void utmToLatLon(double utmE, double utmN, int zone, double& lat, double& lon);
 
 // ── State ─────────────────────────────────────────────────────
 bool   relayActive    = false;
@@ -327,6 +330,7 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
   <div class="pill off" id=spill><div class=sdot></div><span id=slbl>Offline</span></div>
   <nav>
     <button class="nb active" onclick="showTab('status',this)">Status</button>
+    <button class=nb onclick="showTab('map',this)">Map</button>
     <button class=nb onclick="showTab('field',this)">Field</button>
     <button class=nb onclick="showTab('config',this)">Config</button>
   </nav>
@@ -382,6 +386,22 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
       <div style="color:var(--mu);padding:10px 0">No hits yet.</div>
     </div>
   </div>
+</div>
+
+<!-- MAP -->
+<div id=t-map class=sec>
+  <div class=sech>
+    <div class=slbl>Satellite View</div>
+    <h2 class=hl>Field Map</h2>
+  </div>
+  <div class=card style="padding:0;overflow:hidden">
+    <div id=map style="height:520px;width:100%;background:#f0ede8"></div>
+  </div>
+  <p class=note style="margin-top:10px">
+    <span style="color:var(--pr);font-weight:700">Yellow</span> = planned trees &nbsp;
+    <span style="color:var(--pb);font-weight:700">Green</span> = hits fired &nbsp;
+    <span style="color:#0369a1;font-weight:700">Blue</span> = tractor position
+  </p>
 </div>
 
 <!-- FIELD -->
@@ -476,6 +496,69 @@ var showTab=(t,btn)=>{
   if(t==='config')fillForm(window._cfg||{});
   if(t==='field')fetchField();
   if(t==='status')fetchHits();
+  if(t==='map')initMap();
+};
+var _leafletReady=false,_mapInst=null,_mapLayers={grid:null,hits:null,tractor:null};
+var loadLeaflet=()=>new Promise((ok,ng)=>{
+  if(_leafletReady){ok();return;}
+  var css=document.createElement('link');css.rel='stylesheet';
+  css.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+  document.head.appendChild(css);
+  var js=document.createElement('script');
+  js.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+  js.onload=()=>{_leafletReady=true;ok();};js.onerror=()=>ng('leaflet load fail');
+  document.head.appendChild(js);
+});
+var initMap=async()=>{
+  if(_mapInst){setTimeout(()=>_mapInst.invalidateSize(),100);return;}
+  try{await loadLeaflet();}catch(e){document.getElementById('map').innerHTML='<p style="padding:20px;color:var(--er)">Failed to load Leaflet (need internet). '+e+'</p>';return;}
+  _mapInst=L.map('map',{maxZoom:20,zoomControl:true});
+  var sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {attribution:'&copy; Esri',maxNativeZoom:19,maxZoom:20}).addTo(_mapInst);
+  var dark=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    {attribution:'&copy; CartoDB',maxNativeZoom:19,maxZoom:20});
+  var osm=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    {attribution:'&copy; OpenStreetMap',maxNativeZoom:19,maxZoom:20});
+  L.control.layers({'Satellite':sat,'Dark':dark,'Street':osm},{},{position:'topright'}).addTo(_mapInst);
+  _mapInst.setView([-34.3,142.15],16);
+  await refreshMapGrid();
+};
+var refreshMapGrid=async()=>{
+  if(!_mapInst)return;
+  try{
+    var r=await fetch('/api/grid').then(r=>r.json());
+    if(_mapLayers.grid)_mapInst.removeLayer(_mapLayers.grid);
+    var lg=L.layerGroup();
+    r.points.forEach(p=>{
+      L.circleMarker([p[0],p[1]],{radius:4,color:'#92400e',weight:1,fillColor:'#facc15',fillOpacity:0.8})
+        .bindTooltip('R'+p[2]+' T'+p[3],{direction:'top',offset:[0,-4]}).addTo(lg);
+    });
+    lg.addTo(_mapInst);
+    _mapLayers.grid=lg;
+    if(r.points.length>0){
+      var bounds=L.latLngBounds(r.points.map(p=>[p[0],p[1]]));
+      _mapInst.fitBounds(bounds.pad(0.2));
+    }
+  }catch(e){console.error('grid fetch failed',e);}
+};
+var updateMapTractor=(lat,lon,fix)=>{
+  if(!_mapInst)return;
+  if(_mapLayers.tractor){_mapInst.removeLayer(_mapLayers.tractor);_mapLayers.tractor=null;}
+  if(!fix)return;
+  _mapLayers.tractor=L.circleMarker([lat,lon],
+    {radius:8,color:'#0369a1',weight:2,fillColor:'#38bdf8',fillOpacity:0.9,className:'tractor-pulse'})
+    .bindTooltip('Tractor',{direction:'top',offset:[0,-8]}).addTo(_mapInst);
+};
+var updateMapHits=(hits)=>{
+  if(!_mapInst)return;
+  if(_mapLayers.hits)_mapInst.removeLayer(_mapLayers.hits);
+  var lg=L.layerGroup();
+  hits.forEach(h=>{
+    L.circleMarker([h.lat,h.lon],{radius:5,color:'#166534',weight:1,fillColor:'#4ade80',fillOpacity:0.95})
+      .bindTooltip('R'+h.row+' T'+h.tree+' · '+h.dist.toFixed(2)+'m',{direction:'top',offset:[0,-5]}).addTo(lg);
+  });
+  lg.addTo(_mapInst);
+  _mapLayers.hits=lg;
 };
 var _lastHitCount=-1;
 var fetchHits=()=>{
@@ -493,6 +576,7 @@ var fetchHits=()=>{
         '</div>';
     });
     el.innerHTML=html;
+    updateMapHits(rows);
   }).catch(()=>{});
 };
 var fetchField=()=>{
@@ -524,7 +608,7 @@ var fieldUpload=async ()=>{
   fetch('/field/upload',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({ablines:ab,field:fl})})
     .then(r=>r.json()).then(d=>{
-      if(d.ok){st.textContent='OK. '+d.intersections+' intersections built. Lines in file: '+d.linesFound;fetchField();poll();}
+      if(d.ok){st.textContent='OK. '+d.intersections+' intersections built. Lines in file: '+d.linesFound;fetchField();poll();refreshMapGrid();}
       else st.textContent='Error: '+JSON.stringify(d);
     }).catch(e=>st.textContent='Error: '+e);
 };
@@ -536,13 +620,13 @@ var applyLines=()=>{
     body:JSON.stringify({rowName:rn,treeName:tn,mode:1})})
     .then(r=>r.json()).then(d=>{
       document.getElementById('fd-status').textContent='Rebuilt. linesOk='+d.linesOk+' intersections='+d.intersections;
-      fetchField();poll();
+      fetchField();poll();refreshMapGrid();
     });
 };
 var setMode=(m)=>{
   fetch('/field/apply',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({mode:m})})
-    .then(r=>r.json()).then(d=>{fetchField();poll();});
+    .then(r=>r.json()).then(d=>{fetchField();poll();refreshMapGrid();});
 };
 var _formFilled=false;
 var fillForm=(c)=>{
@@ -589,6 +673,8 @@ var poll=()=>{
     if(!_formFilled)fillForm(c);
     // Refresh hit log when count changes or once on initial load.
     if(d.hits!==_lastHitCount){_lastHitCount=d.hits;fetchHits();}
+    // Live tractor marker on the map (only effective if map tab has loaded)
+    updateMapTractor(d.lat,d.lon,d.fix);
   }).catch(()=>{});
 };
 var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
@@ -932,6 +1018,56 @@ void latLonToLocal(double lat, double lon, double& localE, double& localN) {
   latLonToUTM(lat, lon, gFieldZone, utmE, utmN);
   localE = utmE - gFieldUtmE;
   localN = utmN - gFieldUtmN;
+}
+
+// ── WGS84 UTM inverse projection ──────────────────────────────
+// Converts (utmE, utmN) within a given zone back to lat/lon. Used
+// by /api/grid to return intersection coordinates that the browser
+// map tab can plot without needing its own UTM code.
+void utmToLatLon(double utmE, double utmN, int zone, double& lat, double& lon) {
+  const double a  = 6378137.0;
+  const double e2 = 0.00669437999014;
+  const double k0 = 0.9996;
+  const double e4 = e2 * e2;
+  const double e6 = e4 * e2;
+  const double ep2 = e2 / (1.0 - e2);
+  // Heuristic: utmN > 5e6 implies southern hemisphere with 10 000 000 m offset
+  // applied by the forward projection. Works for every non-equatorial field.
+  bool southern = (utmN > 5000000.0);
+  double y = utmN - (southern ? 10000000.0 : 0.0);
+  double x = utmE - 500000.0;
+  double lon0 = ((zone - 1) * 6 - 180 + 3) * M_PI / 180.0;
+  double M = y / k0;
+  double mu = M / (a * (1.0 - e2/4.0 - 3.0*e4/64.0 - 5.0*e6/256.0));
+  double e1 = (1.0 - sqrt(1.0 - e2)) / (1.0 + sqrt(1.0 - e2));
+  double phi1 = mu
+    + (3.0*e1/2.0   - 27.0*e1*e1*e1/32.0)                  * sin(2.0*mu)
+    + (21.0*e1*e1/16.0 - 55.0*e1*e1*e1*e1/32.0)            * sin(4.0*mu)
+    + (151.0*e1*e1*e1/96.0)                                * sin(6.0*mu)
+    + (1097.0*e1*e1*e1*e1/512.0)                           * sin(8.0*mu);
+  double sinPhi1 = sin(phi1);
+  double cosPhi1 = cos(phi1);
+  double tanPhi1 = tan(phi1);
+  double N1 = a / sqrt(1.0 - e2 * sinPhi1 * sinPhi1);
+  double T1 = tanPhi1 * tanPhi1;
+  double C1 = ep2 * cosPhi1 * cosPhi1;
+  double R1 = a * (1.0 - e2) / pow(1.0 - e2 * sinPhi1 * sinPhi1, 1.5);
+  double D  = x / (N1 * k0);
+  double latR = phi1 - (N1 * tanPhi1 / R1) *
+    (D*D/2.0
+     - (5.0 + 3.0*T1 + 10.0*C1 - 4.0*C1*C1 - 9.0*ep2) * D*D*D*D/24.0
+     + (61.0 + 90.0*T1 + 298.0*C1 + 45.0*T1*T1 - 252.0*ep2 - 3.0*C1*C1) * D*D*D*D*D*D/720.0);
+  double lonR = lon0 +
+    (D - (1.0 + 2.0*T1 + C1) * D*D*D/6.0
+       + (5.0 - 2.0*C1 + 28.0*T1 - 3.0*C1*C1 + 8.0*ep2 + 24.0*T1*T1) * D*D*D*D*D/120.0
+    ) / cosPhi1;
+  lat = latR * 180.0 / M_PI;
+  lon = lonR * 180.0 / M_PI;
+}
+
+// Local E/N → lat/lon (inverse of latLonToLocal)
+void localToLatLon(double localE, double localN, double& lat, double& lon) {
+  utmToLatLon(localE + gFieldUtmE, localN + gFieldUtmN, gFieldZone, lat, lon);
 }
 
 // ── AOG Field.txt parser ──────────────────────────────────────
@@ -1541,6 +1677,51 @@ void handleFieldApply() {
   webServer.send(200, "application/json", out);
 }
 
+// GET /api/grid — planned tree positions as lat/lon, either from
+// the Simple grid[][] or from intersections[] in AB mode. Designed
+// for the dashboard Map tab to plot without needing its own maths.
+// Responds with streaming chunks for large grids (up to 2000 points).
+void handleGrid() {
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webServer.sendHeader("Cache-Control", "no-cache");
+  webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webServer.send(200, "application/json", "");
+
+  char head[96];
+  snprintf(head, sizeof(head),
+    "{\"mode\":%d,\"rows\":%d,\"trees\":%d,\"points\":[",
+    gGridMode, gNumRows, gNumTrees);
+  webServer.sendContent(head);
+
+  bool first = true;
+  char buf[80];
+
+  if (gGridMode == MODE_AB && gHasLines && gHasField) {
+    for (int i = 0; i < numIntersections; i++) {
+      double lat, lon;
+      localToLatLon(intersections[i].e, intersections[i].n, lat, lon);
+      int r = i / gNumTrees;
+      int t = i % gNumTrees;
+      snprintf(buf, sizeof(buf), "%s[%.7f,%.7f,%d,%d]",
+               first ? "" : ",", lat, lon, r, t);
+      webServer.sendContent(buf);
+      first = false;
+    }
+  } else {
+    for (int r = 0; r < gNumRows; r++) {
+      for (int t = 0; t < gNumTrees; t++) {
+        snprintf(buf, sizeof(buf), "%s[%.7f,%.7f,%d,%d]",
+                 first ? "" : ",", grid[r][t].lat, grid[r][t].lon, r, t);
+        webServer.sendContent(buf);
+        first = false;
+      }
+    }
+  }
+
+  webServer.sendContent("]}");
+  webServer.sendContent("");  // end chunked stream
+}
+
 // GET /api/hits — last 20 fires, newest first
 void handleHits() {
   String out; out.reserve(1600);
@@ -1666,6 +1847,7 @@ void setup() {
   webServer.on("/scan",        HTTP_GET,  handleScan);
   webServer.on("/api/status",  HTTP_GET,  handleStatus);
   webServer.on("/api/hits",    HTTP_GET,  handleHits);
+  webServer.on("/api/grid",    HTTP_GET,  handleGrid);
   webServer.on("/relay",       HTTP_POST, handleRelay);
   webServer.on("/config/grid", HTTP_POST, handleConfigGrid);
   webServer.on("/config/wifi", HTTP_POST, handleConfigWifi);
