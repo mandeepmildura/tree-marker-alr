@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.3.3"
+#define FW_VERSION "1.4.0"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -44,6 +44,18 @@
 #define DEF_NUM_TREES     50
 #define DEF_HIT_RADIUS    0.35
 #define DEF_RELAY_PULSE   600
+
+// ── Grid mode ─────────────────────────────────────────────────
+#define MODE_SIMPLE  0      // origin + bearing + spacings (bench/sim)
+#define MODE_AB      1      // cross-AB lines imported from AgOpenGPS
+
+// Default AB-line names (match whatever you saved in AgOpenGPS)
+#define DEF_ROW_NAME   "Row"
+#define DEF_TREE_NAME  "Tree"
+
+// Max intersections we pre-compute and store in RAM.
+// 2000 × 8 bytes = 16KB — comfortable on ESP32-S3.
+#define MAX_INTERSECTIONS 2000
 
 // ── AgIO UDP ──────────────────────────────────────────────────
 #define UDP_PORT  8888
@@ -91,6 +103,22 @@ double gHitRadius;
 int    gRelayPulse;
 int    gUdpPort;
 
+// ── AB-mode state (loaded from NVS) ───────────────────────────
+int    gGridMode;                 // MODE_SIMPLE or MODE_AB
+char   gRowLineName[48];          // name of row AB line in ABLines.txt
+char   gTreeLineName[48];         // name of tree AB line in ABLines.txt
+double gFieldUtmE;                // UTM easting offset from Field.txt
+double gFieldUtmN;                // UTM northing offset from Field.txt
+int    gFieldZone;                // UTM zone
+double gRowE, gRowN, gRowHdg;     // selected row AB line: point + heading(deg)
+double gTreeE, gTreeN, gTreeHdg;  // selected tree AB line: point + heading(deg)
+bool   gHasField  = false;        // true once Field.txt offsets are stored
+bool   gHasLines  = false;        // true once both AB lines are selected
+
+// Raw ABLines.txt text held in RAM so user can re-pick lines without
+// re-uploading. Persisted in NVS as "ab_raw" (<=3800 chars).
+String gAbLinesRaw;
+
 Preferences prefs;
 
 void loadPrefs() {
@@ -111,6 +139,46 @@ void loadPrefs() {
   gHitRadius   = prefs.getDouble("hit_radius",  DEF_HIT_RADIUS);
   gRelayPulse  = prefs.getInt(   "relay_pulse", DEF_RELAY_PULSE);
   gUdpPort     = prefs.getInt(   "udp_port",    UDP_PORT);
+
+  // AB-mode state
+  gGridMode = prefs.getInt("grid_mode", MODE_SIMPLE);
+  strlcpy(gRowLineName,  prefs.getString("row_name",  DEF_ROW_NAME ).c_str(), sizeof(gRowLineName));
+  strlcpy(gTreeLineName, prefs.getString("tree_name", DEF_TREE_NAME).c_str(), sizeof(gTreeLineName));
+  gFieldUtmE = prefs.getDouble("field_e", 0.0);
+  gFieldUtmN = prefs.getDouble("field_n", 0.0);
+  gFieldZone = prefs.getInt(   "field_z", 0);
+  gHasField  = prefs.getBool(  "has_field", false);
+  gHasLines  = prefs.getBool(  "has_lines", false);
+  gRowE   = prefs.getDouble("row_e",   0);
+  gRowN   = prefs.getDouble("row_n",   0);
+  gRowHdg = prefs.getDouble("row_h",   0);
+  gTreeE  = prefs.getDouble("tree_e",  0);
+  gTreeN  = prefs.getDouble("tree_n",  0);
+  gTreeHdg= prefs.getDouble("tree_h",  0);
+  gAbLinesRaw = prefs.getString("ab_raw", "");
+  prefs.end();
+}
+
+void saveAbPrefs() {
+  prefs.begin("tm", false);
+  prefs.putInt(   "grid_mode", gGridMode);
+  prefs.putString("row_name",  gRowLineName);
+  prefs.putString("tree_name", gTreeLineName);
+  prefs.putDouble("field_e",   gFieldUtmE);
+  prefs.putDouble("field_n",   gFieldUtmN);
+  prefs.putInt(   "field_z",   gFieldZone);
+  prefs.putBool(  "has_field", gHasField);
+  prefs.putBool(  "has_lines", gHasLines);
+  prefs.putDouble("row_e",  gRowE);
+  prefs.putDouble("row_n",  gRowN);
+  prefs.putDouble("row_h",  gRowHdg);
+  prefs.putDouble("tree_e", gTreeE);
+  prefs.putDouble("tree_n", gTreeN);
+  prefs.putDouble("tree_h", gTreeHdg);
+  // NVS string limit is ~4000 bytes — truncate defensively.
+  String r = gAbLinesRaw;
+  if (r.length() > 3800) r = r.substring(0, 3800);
+  prefs.putString("ab_raw", r);
   prefs.end();
 }
 
@@ -241,6 +309,7 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
   <div class="pill off" id=spill><div class=sdot></div><span id=slbl>Offline</span></div>
   <nav>
     <button class="nb active" onclick="showTab('status',this)">Status</button>
+    <button class=nb onclick="showTab('field',this)">Field</button>
     <button class=nb onclick="showTab('config',this)">Config</button>
   </nav>
   <div class=fw id=hfw></div>
@@ -273,9 +342,11 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
       <div class=sr><span class=sk>Origin</span><span class="sv bl" id=c-origin style="font-size:11px">—</span></div>
       <div class=sr><span class=sk>Bearing</span><span class=sv id=c-brg>—</span></div>
       <div class=sr><span class=sk>Row / Tree spacing</span><span class=sv id=c-spacing>—</span></div>
-      <div class=sr><span class=sk>Grid size</span><span class=sv id=c-grid>—</span></div>
-      <div class=sr><span class=sk>Hit radius</span><span class=sv id=c-hr>—</span></div>
-      <div class=sr><span class=sk>Relay pulse</span><span class=sv id=c-rp>—</span></div>
+      <div class=sr><span class=sk>Grid size</span><span class=sv id=c-grid>&mdash;</span></div>
+      <div class=sr><span class=sk>Hit radius</span><span class=sv id=c-hr>&mdash;</span></div>
+      <div class=sr><span class=sk>Relay pulse</span><span class=sv id=c-rp>&mdash;</span></div>
+      <div class=sr><span class=sk>Mode</span><span class=sv id=c-mode>&mdash;</span></div>
+      <div class=sr><span class=sk>Intersections</span><span class=sv id=c-ni>&mdash;</span></div>
     </div>
   </div>
   <div class=card>
@@ -286,6 +357,42 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
       <div class=bs><div class=lbl>Last Tree</div><div class=num id=s-ltree>—</div></div>
       <div class=bs><div class=lbl>Last Dist</div><div class=num id=s-ldist style="font-size:20px">—</div></div>
     </div>
+  </div>
+</div>
+
+<!-- FIELD -->
+<div id=t-field class=sec>
+  <div class=sech>
+    <div class=slbl>AgOpenGPS Field Import</div>
+    <h2 class=hl>Field Source</h2>
+  </div>
+  <div class=card>
+    <div class=clbl>Current State</div>
+    <div class=sr><span class=sk>Grid mode</span><span class=sv id=fd-mode>&mdash;</span></div>
+    <div class=sr><span class=sk>Intersections</span><span class="sv gr" id=fd-n>&mdash;</span></div>
+    <div class=sr><span class=sk>Field offsets</span><span class="sv bl" id=fd-offset style="font-size:11px">&mdash;</span></div>
+    <div class=sr><span class=sk>Active row line</span><span class=sv id=fd-rline>&mdash;</span></div>
+    <div class=sr><span class=sk>Active tree line</span><span class=sv id=fd-tline>&mdash;</span></div>
+    <div class=sr><span class=sk>Lines in file</span><span class="sv bl" id=fd-avail style="font-size:11px">&mdash;</span></div>
+    <div class=dvd></div>
+    <button class="btn btn-p" onclick=setMode(1)><span>Use AB mode (from AgOpenGPS)</span><span class=bi>&rarr;</span></button>
+    <button class="btn btn-g" onclick=setMode(0)><span>Use Simple mode (origin + bearing)</span><span class=bi>&rarr;</span></button>
+  </div>
+  <div class=card>
+    <div class=clbl>Upload from AgOpenGPS Field Folder</div>
+    <div class=fg><label>ABLines.txt</label><input id=fd-ab type=file accept=".txt"></div>
+    <div class=fg><label>Field.txt</label><input id=fd-ft type=file accept=".txt"></div>
+    <button class="btn btn-p" onclick=fieldUpload()><span>Upload &amp; Apply</span><span class=bi>&#8593;</span></button>
+    <p class=note id=fd-status>Save two AB lines in AgOpenGPS (one row direction, one tree direction). Copy ABLines.txt and Field.txt from your field folder and drop them here.</p>
+  </div>
+  <div class=card>
+    <div class=clbl>Active Line Names</div>
+    <div class=g2>
+      <div class=fg><label>Row Line Name</label><input id=fd-rname type=text></div>
+      <div class=fg><label>Tree Line Name</label><input id=fd-tname type=text></div>
+    </div>
+    <button class="btn btn-p" onclick=applyLines()><span>Re-pick &amp; Rebuild Grid</span><span class=bi>&#10003;</span></button>
+    <p class=note>The names must match exactly what you saved them as in AgOpenGPS.</p>
   </div>
 </div>
 
@@ -343,6 +450,56 @@ var showTab=(t,btn)=>{
   document.getElementById('t-'+t).classList.add('active');
   btn.classList.add('active');
   if(t==='config')fillForm(window._cfg||{});
+  if(t==='field')fetchField();
+};
+var fetchField=()=>{
+  fetch('/field/state').then(r=>r.json()).then(d=>{
+    document.getElementById('fd-mode').textContent=d.mode===1?'AB (from AOG)':'Simple (origin+bearing)';
+    document.getElementById('fd-n').textContent=d.intersections;
+    var f=d.field;
+    document.getElementById('fd-offset').textContent=d.hasField?
+      ('E='+f.e.toFixed(1)+'  N='+f.n.toFixed(1)+'  Zone '+f.zone):'(not loaded)';
+    document.getElementById('fd-rline').textContent=d.hasLines?d.rowName:(d.rowName+' (not found)');
+    document.getElementById('fd-tline').textContent=d.hasLines?d.treeName:(d.treeName+' (not found)');
+    document.getElementById('fd-avail').textContent=d.availableLines||'(no file uploaded)';
+    document.getElementById('fd-rname').value=d.rowName;
+    document.getElementById('fd-tname').value=d.treeName;
+  }).catch(()=>{});
+};
+var readFileAsText=(inp)=>new Promise((ok,ng)=>{
+  var f=inp.files[0];if(!f){ok('');return;}
+  var r=new FileReader();
+  r.onload=()=>ok(r.result);r.onerror=()=>ng('read fail');
+  r.readAsText(f);
+});
+var fieldUpload=async ()=>{
+  var st=document.getElementById('fd-status');
+  var ab=await readFileAsText(document.getElementById('fd-ab'));
+  var fl=await readFileAsText(document.getElementById('fd-ft'));
+  if(!ab||!fl){alert('Pick both ABLines.txt and Field.txt');return;}
+  st.textContent='Uploading...';
+  fetch('/field/upload',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ablines:ab,field:fl})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){st.textContent='OK. '+d.intersections+' intersections built. Lines in file: '+d.linesFound;fetchField();poll();}
+      else st.textContent='Error: '+JSON.stringify(d);
+    }).catch(e=>st.textContent='Error: '+e);
+};
+var applyLines=()=>{
+  var rn=document.getElementById('fd-rname').value.trim();
+  var tn=document.getElementById('fd-tname').value.trim();
+  if(!rn||!tn){alert('Fill both names');return;}
+  fetch('/field/apply',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rowName:rn,treeName:tn,mode:1})})
+    .then(r=>r.json()).then(d=>{
+      document.getElementById('fd-status').textContent='Rebuilt. linesOk='+d.linesOk+' intersections='+d.intersections;
+      fetchField();poll();
+    });
+};
+var setMode=(m)=>{
+  fetch('/field/apply',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode:m})})
+    .then(r=>r.json()).then(d=>{fetchField();poll();});
 };
 var _formFilled=false;
 var fillForm=(c)=>{
@@ -383,6 +540,8 @@ var poll=()=>{
     document.getElementById('c-grid').textContent=c.rows+' x '+c.trees;
     document.getElementById('c-hr').textContent=c.hr+' m';
     document.getElementById('c-rp').textContent=c.rp+' ms';
+    document.getElementById('c-mode').textContent=c.mode===1?'AB':'Simple';
+    document.getElementById('c-ni').textContent=c.nInt;
     window._cfg=c;
     if(!_formFilled)fillForm(c);
   }).catch(()=>{});
@@ -577,11 +736,28 @@ void checkGrid(double lat, double lon) {
   // Find the nearest tree within hit radius (if any).
   int nearR = -1, nearT = -1;
   double nearD = 1e9;
-  for (int r = 0; r < gNumRows; r++) {
-    for (int t = 0; t < gNumTrees; t++) {
-      double d = distM(lat, lon, grid[r][t].lat, grid[r][t].lon);
+
+  if (gGridMode == MODE_AB) {
+    if (!gHasLines || !gHasField || numIntersections == 0) return;
+    double le, ln;
+    latLonToLocal(lat, lon, le, ln);
+    for (int i = 0; i < numIntersections; i++) {
+      double de = le - intersections[i].e;
+      double dn = ln - intersections[i].n;
+      double d  = sqrt(de*de + dn*dn);
       if (d < gHitRadius && d < nearD) {
-        nearD = d; nearR = r; nearT = t;
+        nearD = d;
+        nearR = i / gNumTrees;
+        nearT = i % gNumTrees;
+      }
+    }
+  } else {
+    for (int r = 0; r < gNumRows; r++) {
+      for (int t = 0; t < gNumTrees; t++) {
+        double d = distM(lat, lon, grid[r][t].lat, grid[r][t].lon);
+        if (d < gHitRadius && d < nearD) {
+          nearD = d; nearR = r; nearT = t;
+        }
       }
     }
   }
@@ -672,6 +848,206 @@ void buildGrid() {
     gNumRows, gNumTrees, gRowSpacing, gTreeSpacing, gHitRadius);
 }
 
+// ================================================================
+//  AB MODE — cross-AB intersection grid imported from AgOpenGPS
+// ================================================================
+
+struct IPt { float e; float n; };
+IPt  intersections[MAX_INTERSECTIONS];
+int  numIntersections = 0;
+
+// ── WGS84 → UTM forward projection ────────────────────────────
+// Standard UTM formulas. Zone comes from AOG's Field.txt.
+// Good to ~1 cm over any ordinary orchard block.
+void latLonToUTM(double lat, double lon, int zone, double& utmE, double& utmN) {
+  const double a  = 6378137.0;
+  const double e2 = 0.00669437999014;
+  const double k0 = 0.9996;
+  double latR = lat * M_PI / 180.0;
+  double lonR = lon * M_PI / 180.0;
+  double lon0 = ((zone - 1) * 6 - 180 + 3) * M_PI / 180.0;
+  double N = a / sqrt(1.0 - e2 * sin(latR) * sin(latR));
+  double T = tan(latR) * tan(latR);
+  double C = e2 / (1.0 - e2) * cos(latR) * cos(latR);
+  double A = cos(latR) * (lonR - lon0);
+  double M = a * ((1.0 - e2/4.0 - 3.0*e2*e2/64.0) * latR
+              - (3.0*e2/8.0 + 3.0*e2*e2/32.0) * sin(2.0*latR)
+              + (15.0*e2*e2/256.0) * sin(4.0*latR));
+  utmE = k0 * N * (A + (1.0 - T + C) * A*A*A / 6.0) + 500000.0;
+  utmN = k0 * (M + N * tan(latR) * (A*A/2.0
+             + (5.0 - T + 9.0*C) * A*A*A*A / 24.0));
+  if (lat < 0) utmN += 10000000.0;
+}
+
+// GPS lat/lon → field-local easting/northing (same frame as AB lines).
+void latLonToLocal(double lat, double lon, double& localE, double& localN) {
+  double utmE, utmN;
+  latLonToUTM(lat, lon, gFieldZone, utmE, utmN);
+  localE = utmE - gFieldUtmE;
+  localN = utmN - gFieldUtmN;
+}
+
+// ── AOG Field.txt parser ──────────────────────────────────────
+// Looks for:
+//   $Offsets
+//   611892,5819115,31
+bool parseFieldTxt(const String& raw, double& e, double& n, int& zone) {
+  int idx = raw.indexOf("$Offsets");
+  if (idx < 0) return false;
+  int nl = raw.indexOf('\n', idx);
+  if (nl < 0) return false;
+  int nl2 = raw.indexOf('\n', nl + 1);
+  if (nl2 < 0) nl2 = raw.length();
+  String line = raw.substring(nl + 1, nl2);
+  line.trim();
+  int c1 = line.indexOf(',');
+  int c2 = line.indexOf(',', c1 + 1);
+  if (c1 < 0 || c2 < 0) return false;
+  e = line.substring(0, c1).toDouble();
+  n = line.substring(c1 + 1, c2).toDouble();
+  zone = line.substring(c2 + 1).toInt();
+  return (zone > 0);
+}
+
+// ── AOG ABLines.txt line finder ───────────────────────────────
+// File format (header):
+//   $LineCount
+//   2
+//   Row Direction,135.450,970.68,252.82
+//   Tree Direction,45.450,-964.53,-252.07
+// Each AB line: name,heading(deg),easting,northing
+bool findABLine(const String& raw, const char* name,
+                double& outE, double& outN, double& outHdg) {
+  int cursor = 0;
+  String target = String(name);
+  target.trim();
+  while (cursor < (int)raw.length()) {
+    int nl = raw.indexOf('\n', cursor);
+    if (nl < 0) nl = raw.length();
+    String line = raw.substring(cursor, nl);
+    cursor = nl + 1;
+    line.trim();
+    if (line.length() == 0)         continue;
+    if (line.startsWith("$"))       continue;     // headers
+    int c1 = line.indexOf(',');
+    int c2 = line.indexOf(',', c1 + 1);
+    int c3 = line.indexOf(',', c2 + 1);
+    if (c1 < 0 || c2 < 0) continue;
+    // Some rows may legitimately have 3 fields (no trailing comma) — allow.
+    String lname = line.substring(0, c1); lname.trim();
+    if (lname != target) continue;
+    double hdg = line.substring(c1 + 1, c2).toDouble();
+    double e, n;
+    if (c3 < 0) {
+      e = line.substring(c2 + 1).toDouble();
+      n = 0.0;  // malformed — skip
+      continue;
+    } else {
+      e = line.substring(c2 + 1, c3).toDouble();
+      n = line.substring(c3 + 1).toDouble();
+    }
+    outHdg = hdg; outE = e; outN = n;
+    return true;
+  }
+  return false;
+}
+
+// ── List all AB line names in the raw text (for UI display) ──
+// Writes up to maxOut comma-joined names into out (for dashboard).
+void listABLineNames(const String& raw, char* out, size_t outSize) {
+  out[0] = '\0';
+  size_t used = 0;
+  int cursor = 0;
+  bool first = true;
+  while (cursor < (int)raw.length() && used + 2 < outSize) {
+    int nl = raw.indexOf('\n', cursor);
+    if (nl < 0) nl = raw.length();
+    String line = raw.substring(cursor, nl);
+    cursor = nl + 1;
+    line.trim();
+    if (line.length() == 0 || line.startsWith("$")) continue;
+    int c1 = line.indexOf(',');
+    if (c1 < 0) continue;
+    String name = line.substring(0, c1); name.trim();
+    if (name.length() == 0) continue;
+    if (!first) {
+      if (used + 2 >= outSize) break;
+      out[used++] = ','; out[used++] = ' '; out[used] = '\0';
+    }
+    size_t want = name.length();
+    if (used + want >= outSize) break;
+    memcpy(out + used, name.c_str(), want);
+    used += want; out[used] = '\0';
+    first = false;
+  }
+}
+
+// ── Build the AB-mode intersection grid ───────────────────────
+// Row AB  defines direction along which trees sit (gNumTrees trees along).
+// Tree AB defines the perpendicular that spaces rows (gNumRows rows across).
+// Intersections grow outward from the "row 0 tree 0" corner in the
+// direction of each line's heading.
+void buildAbIntersections() {
+  numIntersections = 0;
+  if (!gHasLines) return;
+
+  double rowHdgR  = gRowHdg  * M_PI / 180.0;
+  double treeHdgR = gTreeHdg * M_PI / 180.0;
+
+  // Direction unit vectors (AOG uses heading where sin/cos map to E/N):
+  double rowDE  = sin(rowHdgR);   double rowDN  = cos(rowHdgR);
+  double treeDE = sin(treeHdgR);  double treeDN = cos(treeHdgR);
+
+  // Perpendicular-to-row vector (for stepping across rows).
+  double rowPerpE = -rowDN;
+  double rowPerpN =  rowDE;
+  // Perpendicular-to-tree (stepping between tree positions along a row).
+  double treePerpE = -treeDN;
+  double treePerpN =  treeDE;
+
+  // Line-line intersection in flat E/N space.
+  // Solve: (rowE + s*rowDE) = (treeE + u*treeDE)
+  //        (rowN + s*rowDN) = (treeN + u*treeDN)
+  // For each (r, t) offset pair.
+  for (int r = 0; r < gNumRows; r++) {
+    double rE = gRowE + r * gRowSpacing * rowPerpE;
+    double rN = gRowN + r * gRowSpacing * rowPerpN;
+    for (int t = 0; t < gNumTrees; t++) {
+      double tE = gTreeE + t * gTreeSpacing * treePerpE;
+      double tN = gTreeN + t * gTreeSpacing * treePerpN;
+      double denom = rowDE * treeDN - rowDN * treeDE;
+      if (fabs(denom) < 1e-10) continue;   // lines parallel — skip
+      double s = ((tE - rE) * treeDN - (tN - rN) * treeDE) / denom;
+      double iE = rE + s * rowDE;
+      double iN = rN + s * rowDN;
+      if (numIntersections >= MAX_INTERSECTIONS) break;
+      intersections[numIntersections].e = (float)iE;
+      intersections[numIntersections].n = (float)iN;
+      numIntersections++;
+    }
+  }
+  Serial.printf("[AB] Built %d intersections (row='%s' hdg=%.2f, tree='%s' hdg=%.2f)\n",
+                numIntersections, gRowLineName, gRowHdg, gTreeLineName, gTreeHdg);
+}
+
+// ── Resolve named lines against gAbLinesRaw; update state ────
+// Called after upload, after "apply", and on boot if we have raw.
+void resolveActiveABLines() {
+  gHasLines = false;
+  if (gAbLinesRaw.length() == 0) return;
+  double rE, rN, rH, tE, tN, tH;
+  bool rowOk  = findABLine(gAbLinesRaw, gRowLineName,  rE, rN, rH);
+  bool treeOk = findABLine(gAbLinesRaw, gTreeLineName, tE, tN, tH);
+  if (!rowOk || !treeOk) {
+    Serial.printf("[AB] Could not find both lines (row=%s:%d, tree=%s:%d)\n",
+                  gRowLineName, rowOk, gTreeLineName, treeOk);
+    return;
+  }
+  gRowE = rE; gRowN = rN; gRowHdg = rH;
+  gTreeE = tE; gTreeN = tN; gTreeHdg = tH;
+  gHasLines = true;
+}
+
 // ── PGN 239 — section state to AgOpenGPS ─────────────────────
 void sendMachinePGN() {
   uint8_t sections = relayActive ? 0x01 : 0x00;
@@ -757,7 +1133,7 @@ void handleRoot() {
 }
 
 void handleStatus() {
-  char json[512];
+  char json[640];
   snprintf(json, sizeof(json),
     "{\"wifi\":%s,\"mqtt\":%s,\"fix\":%s,"
     "\"ip\":\"%s\",\"fw\":\"%s\",\"uptime\":%lu,"
@@ -765,7 +1141,8 @@ void handleStatus() {
     "\"lat\":%.7f,\"lon\":%.7f,"
     "\"cfg\":{\"lat\":%.7f,\"lon\":%.7f,\"brg\":%.1f,"
     "\"rs\":%.1f,\"ts\":%.1f,\"rows\":%d,\"trees\":%d,"
-    "\"hr\":%.2f,\"rp\":%d,\"ssid\":\"%s\",\"udp\":%d}}",
+    "\"hr\":%.2f,\"rp\":%d,\"ssid\":\"%s\",\"udp\":%d,"
+    "\"mode\":%d,\"nInt\":%d,\"hasField\":%s,\"hasLines\":%s}}",
     WiFi.status()==WL_CONNECTED?"true":"false",
     mqtt.connected()?"true":"false",
     gpsFix?"true":"false",
@@ -775,7 +1152,10 @@ void handleStatus() {
     curLat, curLon,
     gOriginLat, gOriginLon, gRowBearing,
     gRowSpacing, gTreeSpacing, gNumRows, gNumTrees,
-    gHitRadius, gRelayPulse, gWifiSsid, gUdpPort
+    gHitRadius, gRelayPulse, gWifiSsid, gUdpPort,
+    gGridMode, numIntersections,
+    gHasField ? "true" : "false",
+    gHasLines ? "true" : "false"
   );
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
   webServer.send(200, "application/json", json);
@@ -832,6 +1212,7 @@ void handleConfigGrid() {
 
   saveGridPrefs();
   buildGrid();
+  if (gGridMode == MODE_AB && gHasLines) buildAbIntersections();
   Serial.println("WEB: grid config updated");
   webServer.send(200, "text/plain",
     "Grid saved and rebuilt: " + String(gNumRows) + " rows x " + String(gNumTrees) + " trees");
@@ -1002,6 +1383,136 @@ void handleOtaLatest() {
   webServer.send(200, "application/json", out);
 }
 
+// ================================================================
+//  AB FIELD IMPORT — accepts AOG ABLines.txt + Field.txt contents
+// ================================================================
+
+// POST /field/upload — JSON body: {"ablines":"...raw text...", "field":"...raw..."}
+// Stores raw text in NVS, parses field offsets, resolves AB lines,
+// rebuilds intersection grid.
+void handleFieldUpload() {
+  if (webServer.method() != HTTP_POST) {
+    webServer.send(405, "text/plain", "POST only"); return;
+  }
+  String body = webServer.arg("plain");
+  if (body.length() == 0) {
+    webServer.send(400, "text/plain", "Empty body"); return;
+  }
+
+  // Extract "ablines" and "field" strings from JSON by locating keys.
+  // Not a full JSON parser — expects simple {"ablines":"...","field":"..."}
+  // with escaped newlines (\n) and quotes (\") in the strings.
+  auto extract = [](const String& src, const char* key) -> String {
+    String hit = String("\"") + key + "\"";
+    int k = src.indexOf(hit);
+    if (k < 0) return "";
+    int q1 = src.indexOf('"', src.indexOf(':', k) + 1);
+    if (q1 < 0) return "";
+    String out; out.reserve(2048);
+    int i = q1 + 1;
+    while (i < (int)src.length()) {
+      char c = src[i++];
+      if (c == '\\' && i < (int)src.length()) {
+        char n = src[i++];
+        if      (n == 'n')  out += '\n';
+        else if (n == 't')  out += '\t';
+        else if (n == 'r')  out += '\r';
+        else if (n == '"')  out += '"';
+        else if (n == '\\') out += '\\';
+        else                out += n;
+      } else if (c == '"') {
+        return out;
+      } else {
+        out += c;
+      }
+    }
+    return out;
+  };
+
+  String ab    = extract(body, "ablines");
+  String field = extract(body, "field");
+  if (ab.length() == 0 || field.length() == 0) {
+    webServer.send(400, "text/plain",
+      "Missing ablines or field in payload"); return;
+  }
+
+  double fe, fn; int fz;
+  if (!parseFieldTxt(field, fe, fn, fz)) {
+    webServer.send(400, "text/plain",
+      "Could not parse Field.txt (missing $Offsets?)"); return;
+  }
+
+  gFieldUtmE = fe; gFieldUtmN = fn; gFieldZone = fz;
+  gHasField  = true;
+  gAbLinesRaw = ab;
+
+  resolveActiveABLines();
+  if (gHasLines) {
+    gGridMode = MODE_AB;
+    buildAbIntersections();
+  }
+  saveAbPrefs();
+
+  char names[256];
+  listABLineNames(gAbLinesRaw, names, sizeof(names));
+  char out[480];
+  snprintf(out, sizeof(out),
+    "{\"ok\":true,\"field\":{\"e\":%.1f,\"n\":%.1f,\"zone\":%d},"
+    "\"linesFound\":\"%s\",\"rowOk\":%s,\"treeOk\":%s,"
+    "\"intersections\":%d,\"mode\":%d}",
+    fe, fn, fz, names,
+    gHasLines ? "true" : "false", gHasLines ? "true" : "false",
+    numIntersections, gGridMode);
+  webServer.send(200, "application/json", out);
+  Serial.printf("[AB] Upload OK: field E=%.1f N=%.1f Z=%d, %d intersections\n",
+                fe, fn, fz, numIntersections);
+}
+
+// POST /field/apply — {"rowName":"Row","treeName":"Tree","mode":1}
+// Re-picks active lines by name and toggles mode. Intersections rebuild.
+void handleFieldApply() {
+  if (webServer.method() != HTTP_POST) {
+    webServer.send(405, "text/plain", "POST only"); return;
+  }
+  String body = webServer.arg("plain");
+  String rn = jsonStr(body, "rowName");
+  String tn = jsonStr(body, "treeName");
+  int newMode = (int)jsonFloat(body, "mode");
+  if (rn.length() > 0) strlcpy(gRowLineName,  rn.c_str(), sizeof(gRowLineName));
+  if (tn.length() > 0) strlcpy(gTreeLineName, tn.c_str(), sizeof(gTreeLineName));
+  if (newMode == MODE_SIMPLE || newMode == MODE_AB) gGridMode = newMode;
+
+  resolveActiveABLines();
+  if (gGridMode == MODE_AB && gHasLines) buildAbIntersections();
+  else                                   numIntersections = 0;
+  saveAbPrefs();
+
+  char out[200];
+  snprintf(out, sizeof(out),
+    "{\"ok\":true,\"mode\":%d,\"linesOk\":%s,\"intersections\":%d}",
+    gGridMode, gHasLines ? "true" : "false", numIntersections);
+  webServer.send(200, "application/json", out);
+}
+
+// GET /field/state — what the dashboard Field tab shows
+void handleFieldState() {
+  char names[256];
+  listABLineNames(gAbLinesRaw, names, sizeof(names));
+  char out[600];
+  snprintf(out, sizeof(out),
+    "{\"mode\":%d,\"hasField\":%s,\"hasLines\":%s,"
+    "\"field\":{\"e\":%.1f,\"n\":%.1f,\"zone\":%d},"
+    "\"rowName\":\"%s\",\"treeName\":\"%s\","
+    "\"availableLines\":\"%s\",\"intersections\":%d,"
+    "\"abSize\":%d}",
+    gGridMode, gHasField ? "true" : "false", gHasLines ? "true" : "false",
+    gFieldUtmE, gFieldUtmN, gFieldZone,
+    gRowLineName, gTreeLineName, names,
+    numIntersections, (int)gAbLinesRaw.length());
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webServer.send(200, "application/json", out);
+}
+
 // ── Start SoftAP captive-portal setup mode ───────────────────
 void startAP() {
   apMode = true;
@@ -1068,6 +1579,10 @@ void setup() {
 
   loadPrefs();
   buildGrid();
+  if (gGridMode == MODE_AB) {
+    resolveActiveABLines();
+    if (gHasLines) buildAbIntersections();
+  }
 
   // If DL button is held at boot, force AP setup mode.
   bool forceAP = (digitalRead(SETUP_BUTTON_PIN) == LOW);
@@ -1089,6 +1604,9 @@ void setup() {
   webServer.on("/ota",         HTTP_POST, handleOtaWeb);
   webServer.on("/ota/latest",  HTTP_GET,  handleOtaLatest);
   webServer.on("/ota/upload",  HTTP_POST, handleOtaUploadEnd, handleOtaUploadChunk);
+  webServer.on("/field/upload",HTTP_POST, handleFieldUpload);
+  webServer.on("/field/apply", HTTP_POST, handleFieldApply);
+  webServer.on("/field/state", HTTP_GET,  handleFieldState);
   // Captive-portal catch-all: anything unknown in AP mode redirects to setup
   webServer.onNotFound([]() {
     if (apMode) { webServer.send_P(200, "text/html", SETUP_PAGE); }
