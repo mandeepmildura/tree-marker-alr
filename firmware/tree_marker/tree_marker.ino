@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.2"
+#define FW_VERSION "1.4.3"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -56,6 +56,10 @@
 // Max intersections we pre-compute and store in RAM.
 // 2000 × 8 bytes = 16KB — comfortable on ESP32-S3.
 #define MAX_INTERSECTIONS 2000
+
+// Max boundary polygon vertices. 256 × 8 bytes = 2KB, and typical
+// orchard boundaries have <100 points.
+#define MAX_BOUNDARY 256
 
 // ── AgIO UDP ──────────────────────────────────────────────────
 #define UDP_PORT  8888
@@ -156,6 +160,17 @@ void loadPrefs() {
   gTreeN  = prefs.getDouble("tree_n",  0);
   gTreeHdg= prefs.getDouble("tree_h",  0);
   gAbLinesRaw = prefs.getString("ab_raw", "");
+  gHasBoundary = prefs.getBool("has_bnd", false);
+  numBoundary  = 0;
+  if (gHasBoundary) {
+    size_t want = prefs.getBytesLength("bnd_pts");
+    if (want > 0 && want <= sizeof(boundary)) {
+      prefs.getBytes("bnd_pts", boundary, want);
+      numBoundary = want / sizeof(IPt);
+    } else {
+      gHasBoundary = false;
+    }
+  }
   prefs.end();
 }
 
@@ -179,6 +194,12 @@ void saveAbPrefs() {
   String r = gAbLinesRaw;
   if (r.length() > 3800) r = r.substring(0, 3800);
   prefs.putString("ab_raw", r);
+  prefs.putBool("has_bnd", gHasBoundary);
+  if (gHasBoundary && numBoundary > 0) {
+    prefs.putBytes("bnd_pts", boundary, numBoundary * sizeof(IPt));
+  } else {
+    prefs.remove("bnd_pts");
+  }
   prefs.end();
 }
 
@@ -227,6 +248,13 @@ Point grid[20][100];   // [row][tree]  max 20x100
 struct IPt { float e; float n; };
 IPt  intersections[MAX_INTERSECTIONS];
 int  numIntersections = 0;
+
+// Boundary polygon (AOG Boundary.txt → local E/N). Intersections outside
+// the polygon are dropped during buildAbIntersections so they never fire.
+IPt  boundary[MAX_BOUNDARY];
+int  numBoundary = 0;
+bool gHasBoundary = false;
+int  lastRawIntersections = 0;  // count before boundary clip (for UI)
 
 // Ring buffer of the last 20 fires — for the dashboard "Recent Hits" card
 // and field calibration. Ephemeral (cleared on reboot).
@@ -398,9 +426,10 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     <div id=map style="height:520px;width:100%;background:#f0ede8"></div>
   </div>
   <p class=note style="margin-top:10px">
-    <span style="color:var(--pr);font-weight:700">Yellow</span> = planned trees &nbsp;
+    <span style="color:#ca8a04;font-weight:700">Yellow</span> = planned trees &nbsp;
     <span style="color:var(--pb);font-weight:700">Green</span> = hits fired &nbsp;
-    <span style="color:#0369a1;font-weight:700">Blue</span> = tractor position
+    <span style="color:#0369a1;font-weight:700">Blue</span> = tractor &nbsp;
+    <span style="color:var(--pr);font-weight:700">Green dashed</span> = field boundary
   </p>
 </div>
 
@@ -418,6 +447,7 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     <div class=sr><span class=sk>Active row line</span><span class=sv id=fd-rline>&mdash;</span></div>
     <div class=sr><span class=sk>Active tree line</span><span class=sv id=fd-tline>&mdash;</span></div>
     <div class=sr><span class=sk>Lines in file</span><span class="sv bl" id=fd-avail style="font-size:11px">&mdash;</span></div>
+    <div class=sr><span class=sk>Boundary</span><span class=sv id=fd-bndy>&mdash;</span></div>
     <div class=dvd></div>
     <button class="btn btn-p" onclick=setMode(1)><span>Use AB mode (from AgOpenGPS)</span><span class=bi>&rarr;</span></button>
     <button class="btn btn-g" onclick=setMode(0)><span>Use Simple mode (origin + bearing)</span><span class=bi>&rarr;</span></button>
@@ -426,8 +456,9 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     <div class=clbl>Upload from AgOpenGPS Field Folder</div>
     <div class=fg><label>ABLines.txt</label><input id=fd-ab type=file accept=".txt"></div>
     <div class=fg><label>Field.txt</label><input id=fd-ft type=file accept=".txt"></div>
+    <div class=fg><label>Boundary.txt <span style="color:var(--mu);font-weight:400;text-transform:none;letter-spacing:0">(optional &mdash; clips grid to field shape)</span></label><input id=fd-bnd type=file accept=".txt"></div>
     <button class="btn btn-p" onclick=fieldUpload()><span>Upload &amp; Apply</span><span class=bi>&#8593;</span></button>
-    <p class=note id=fd-status>Save two AB lines in AgOpenGPS (one row direction, one tree direction). Copy ABLines.txt and Field.txt from your field folder and drop them here.</p>
+    <p class=note id=fd-status>Save two AB lines in AgOpenGPS (one row direction, one tree direction), plus optionally the field boundary. Copy ABLines.txt, Field.txt, and Boundary.txt from your field folder and drop them here.</p>
   </div>
   <div class=card>
     <div class=clbl>Active Line Names</div>
@@ -498,7 +529,7 @@ var showTab=(t,btn)=>{
   if(t==='status')fetchHits();
   if(t==='map')initMap();
 };
-var _leafletReady=false,_mapInst=null,_mapLayers={grid:null,hits:null,tractor:null};
+var _leafletReady=false,_mapInst=null,_mapLayers={grid:null,hits:null,tractor:null,boundary:null};
 var loadLeaflet=()=>new Promise((ok,ng)=>{
   if(_leafletReady){ok();return;}
   var css=document.createElement('link');css.rel='stylesheet';
@@ -528,6 +559,13 @@ var refreshMapGrid=async()=>{
   try{
     var r=await fetch('/api/grid').then(r=>r.json());
     if(_mapLayers.grid)_mapInst.removeLayer(_mapLayers.grid);
+    if(_mapLayers.boundary)_mapInst.removeLayer(_mapLayers.boundary);
+    // Boundary polygon (if present) — draw under the trees
+    if(r.boundary&&r.boundary.length>=3){
+      _mapLayers.boundary=L.polygon(r.boundary,
+        {color:'#006e2f',weight:2,fillColor:'#006e2f',fillOpacity:0.08,dashArray:'6 4'})
+        .bindTooltip('Field boundary ('+r.boundary.length+' vertices)').addTo(_mapInst);
+    }
     var lg=L.layerGroup();
     r.points.forEach(p=>{
       L.circleMarker([p[0],p[1]],{radius:4,color:'#92400e',weight:1,fillColor:'#facc15',fillOpacity:0.8})
@@ -535,9 +573,10 @@ var refreshMapGrid=async()=>{
     });
     lg.addTo(_mapInst);
     _mapLayers.grid=lg;
-    if(r.points.length>0){
-      var bounds=L.latLngBounds(r.points.map(p=>[p[0],p[1]]));
-      _mapInst.fitBounds(bounds.pad(0.2));
+    // Fit to boundary if we have one (tighter fit), else to tree grid
+    var fitSrc=(r.boundary&&r.boundary.length>=3)?r.boundary:r.points.map(p=>[p[0],p[1]]);
+    if(fitSrc.length>0){
+      _mapInst.fitBounds(L.latLngBounds(fitSrc).pad(0.15));
     }
   }catch(e){console.error('grid fetch failed',e);}
 };
@@ -582,13 +621,17 @@ var fetchHits=()=>{
 var fetchField=()=>{
   fetch('/field/state').then(r=>r.json()).then(d=>{
     document.getElementById('fd-mode').textContent=d.mode===1?'AB (from AOG)':'Simple (origin+bearing)';
-    document.getElementById('fd-n').textContent=d.intersections;
+    var nlbl=d.hasBoundary&&d.rawIntersections>d.intersections
+      ?(d.intersections+' ('+d.rawIntersections+' before boundary clip)')
+      :(''+d.intersections);
+    document.getElementById('fd-n').textContent=nlbl;
     var f=d.field;
     document.getElementById('fd-offset').textContent=d.hasField?
       ('E='+f.e.toFixed(1)+'  N='+f.n.toFixed(1)+'  Zone '+f.zone):'(not loaded)';
     document.getElementById('fd-rline').textContent=d.hasLines?d.rowName:(d.rowName+' (not found)');
     document.getElementById('fd-tline').textContent=d.hasLines?d.treeName:(d.treeName+' (not found)');
     document.getElementById('fd-avail').textContent=d.availableLines||'(no file uploaded)';
+    document.getElementById('fd-bndy').textContent=d.hasBoundary?(d.boundary+' vertices (active)'):'(none)';
     document.getElementById('fd-rname').value=d.rowName;
     document.getElementById('fd-tname').value=d.treeName;
   }).catch(()=>{});
@@ -603,13 +646,21 @@ var fieldUpload=async ()=>{
   var st=document.getElementById('fd-status');
   var ab=await readFileAsText(document.getElementById('fd-ab'));
   var fl=await readFileAsText(document.getElementById('fd-ft'));
-  if(!ab||!fl){alert('Pick both ABLines.txt and Field.txt');return;}
+  var bd=await readFileAsText(document.getElementById('fd-bnd'));
+  if(!ab||!fl){alert('Pick both ABLines.txt and Field.txt (Boundary.txt is optional)');return;}
   st.textContent='Uploading...';
+  var body={ablines:ab,field:fl};
+  if(bd)body.boundary=bd;
   fetch('/field/upload',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ablines:ab,field:fl})})
+    body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{
-      if(d.ok){st.textContent='OK. '+d.intersections+' intersections built. Lines in file: '+d.linesFound;fetchField();poll();refreshMapGrid();}
-      else st.textContent='Error: '+JSON.stringify(d);
+      if(d.ok){
+        var msg='OK. '+d.intersections+' intersections';
+        if(d.boundary>0)msg+=' ('+d.rawIntersections+' before boundary clip, boundary='+d.boundary+' vertices)';
+        msg+='. Lines in file: '+d.linesFound;
+        st.textContent=msg;
+        fetchField();poll();refreshMapGrid();
+      } else st.textContent='Error: '+JSON.stringify(d);
     }).catch(e=>st.textContent='Error: '+e);
 };
 var applyLines=()=>{
@@ -1165,6 +1216,59 @@ void listABLineNames(const String& raw, char* out, size_t outSize) {
   }
 }
 
+// ── AOG Boundary.txt parser ──────────────────────────────────
+// AgOpenGPS stores field boundaries in a few slightly different shapes
+// depending on version, but the common denominator is lines of
+// easting,northing(,heading,lat,lon...) in local coordinates. We accept
+// any non-$-prefixed line whose first two comma-separated fields parse
+// as numbers, taking those as E/N. This handles v5-style, v6-style, and
+// hand-edited files without fuss.
+int parseBoundaryTxt(const String& raw, IPt* out, int maxOut) {
+  int count = 0;
+  int cursor = 0;
+  while (cursor < (int)raw.length() && count < maxOut) {
+    int nl = raw.indexOf('\n', cursor);
+    if (nl < 0) nl = raw.length();
+    String line = raw.substring(cursor, nl);
+    cursor = nl + 1;
+    line.trim();
+    if (line.length() == 0 || line.startsWith("$")) continue;
+    int c1 = line.indexOf(',');
+    if (c1 < 0) continue;
+    int c2 = line.indexOf(',', c1 + 1);
+    String eStr = line.substring(0, c1);
+    String nStr = (c2 < 0) ? line.substring(c1 + 1) : line.substring(c1 + 1, c2);
+    eStr.trim(); nStr.trim();
+    // Reject non-numeric rows (e.g. "1" as a count line)
+    if (eStr.length() == 0 || nStr.length() == 0) continue;
+    double e = eStr.toDouble();
+    double n = nStr.toDouble();
+    // If both parsed to literal 0, it's probably a header/count row — skip
+    if (e == 0.0 && n == 0.0 && !(eStr == "0" && nStr == "0")) continue;
+    out[count].e = (float)e;
+    out[count].n = (float)n;
+    count++;
+  }
+  return count;
+}
+
+// ── Ray-casting point-in-polygon test ────────────────────────
+// Works on the boundary[] array (local E/N). Returns true if (e,n) is
+// inside the polygon, edges inclusive-ish (doesn't matter at cm scale).
+bool pointInBoundary(double e, double n) {
+  if (!gHasBoundary || numBoundary < 3) return true;
+  bool inside = false;
+  for (int i = 0, j = numBoundary - 1; i < numBoundary; j = i++) {
+    double xi = boundary[i].e, yi = boundary[i].n;
+    double xj = boundary[j].e, yj = boundary[j].n;
+    if (((yi > n) != (yj > n)) &&
+        (e < (xj - xi) * (n - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
 // ── Build the AB-mode intersection grid ───────────────────────
 // Row AB  defines direction along which trees sit (gNumTrees trees along).
 // Tree AB defines the perpendicular that spaces rows (gNumRows rows across).
@@ -1172,6 +1276,7 @@ void listABLineNames(const String& raw, char* out, size_t outSize) {
 // direction of each line's heading.
 void buildAbIntersections() {
   numIntersections = 0;
+  lastRawIntersections = 0;
   if (!gHasLines) return;
 
   double rowHdgR  = gRowHdg  * M_PI / 180.0;
@@ -1204,13 +1309,22 @@ void buildAbIntersections() {
       double iE = rE + s * rowDE;
       double iN = rN + s * rowDN;
       if (numIntersections >= MAX_INTERSECTIONS) break;
+      lastRawIntersections++;
+      // Clip to boundary polygon if one was loaded
+      if (gHasBoundary && !pointInBoundary(iE, iN)) continue;
       intersections[numIntersections].e = (float)iE;
       intersections[numIntersections].n = (float)iN;
       numIntersections++;
     }
   }
-  Serial.printf("[AB] Built %d intersections (row='%s' hdg=%.2f, tree='%s' hdg=%.2f)\n",
-                numIntersections, gRowLineName, gRowHdg, gTreeLineName, gTreeHdg);
+  if (gHasBoundary) {
+    Serial.printf("[AB] Built %d intersections (%d → %d after boundary clip, row='%s', tree='%s')\n",
+                  numIntersections, lastRawIntersections, numIntersections,
+                  gRowLineName, gTreeLineName);
+  } else {
+    Serial.printf("[AB] Built %d intersections (row='%s' hdg=%.2f, tree='%s' hdg=%.2f)\n",
+                  numIntersections, gRowLineName, gRowHdg, gTreeLineName, gTreeHdg);
+  }
 }
 
 // ── Resolve named lines against gAbLinesRaw; update state ────
@@ -1612,8 +1726,9 @@ void handleFieldUpload() {
     return out;
   };
 
-  String ab    = extract(body, "ablines");
-  String field = extract(body, "field");
+  String ab     = extract(body, "ablines");
+  String field  = extract(body, "field");
+  String bndRaw = extract(body, "boundary");  // optional
   if (ab.length() == 0 || field.length() == 0) {
     webServer.send(400, "text/plain",
       "Missing ablines or field in payload"); return;
@@ -1629,6 +1744,17 @@ void handleFieldUpload() {
   gHasField  = true;
   gAbLinesRaw = ab;
 
+  // Boundary is optional — accept an empty/absent one as "clear boundary".
+  if (bndRaw.length() > 0) {
+    numBoundary = parseBoundaryTxt(bndRaw, boundary, MAX_BOUNDARY);
+    gHasBoundary = (numBoundary >= 3);
+    Serial.printf("[AB] Boundary parsed: %d vertices, active=%d\n",
+                  numBoundary, gHasBoundary);
+  } else {
+    numBoundary = 0;
+    gHasBoundary = false;
+  }
+
   resolveActiveABLines();
   if (gHasLines) {
     gGridMode = MODE_AB;
@@ -1638,17 +1764,18 @@ void handleFieldUpload() {
 
   char names[256];
   listABLineNames(gAbLinesRaw, names, sizeof(names));
-  char out[480];
+  char out[520];
   snprintf(out, sizeof(out),
     "{\"ok\":true,\"field\":{\"e\":%.1f,\"n\":%.1f,\"zone\":%d},"
     "\"linesFound\":\"%s\",\"rowOk\":%s,\"treeOk\":%s,"
-    "\"intersections\":%d,\"mode\":%d}",
+    "\"intersections\":%d,\"rawIntersections\":%d,"
+    "\"boundary\":%d,\"mode\":%d}",
     fe, fn, fz, names,
     gHasLines ? "true" : "false", gHasLines ? "true" : "false",
-    numIntersections, gGridMode);
+    numIntersections, lastRawIntersections, numBoundary, gGridMode);
   webServer.send(200, "application/json", out);
-  Serial.printf("[AB] Upload OK: field E=%.1f N=%.1f Z=%d, %d intersections\n",
-                fe, fn, fz, numIntersections);
+  Serial.printf("[AB] Upload OK: field E=%.1f N=%.1f Z=%d, %d intersections, boundary=%d\n",
+                fe, fn, fz, numIntersections, numBoundary);
 }
 
 // POST /field/apply — {"rowName":"Row","treeName":"Tree","mode":1}
@@ -1717,7 +1844,21 @@ void handleGrid() {
     }
   }
 
+  out += "]";
+
+  // Optional boundary polygon (AB mode only)
+  out += ",\"boundary\":[";
+  if (gGridMode == MODE_AB && gHasField && gHasBoundary) {
+    for (int i = 0; i < numBoundary; i++) {
+      double lat, lon;
+      localToLatLon(boundary[i].e, boundary[i].n, lat, lon);
+      int n = snprintf(buf, sizeof(buf), "%s[%.7f,%.7f]",
+                       i ? "," : "", lat, lon);
+      out.concat(buf, n);
+    }
+  }
   out += "]}";
+
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
   webServer.sendHeader("Cache-Control", "no-cache");
   webServer.send(200, "application/json", out);
@@ -1747,17 +1888,20 @@ void handleHits() {
 void handleFieldState() {
   char names[256];
   listABLineNames(gAbLinesRaw, names, sizeof(names));
-  char out[600];
+  char out[700];
   snprintf(out, sizeof(out),
     "{\"mode\":%d,\"hasField\":%s,\"hasLines\":%s,"
     "\"field\":{\"e\":%.1f,\"n\":%.1f,\"zone\":%d},"
     "\"rowName\":\"%s\",\"treeName\":\"%s\","
     "\"availableLines\":\"%s\",\"intersections\":%d,"
+    "\"rawIntersections\":%d,\"hasBoundary\":%s,\"boundary\":%d,"
     "\"abSize\":%d}",
     gGridMode, gHasField ? "true" : "false", gHasLines ? "true" : "false",
     gFieldUtmE, gFieldUtmN, gFieldZone,
     gRowLineName, gTreeLineName, names,
-    numIntersections, (int)gAbLinesRaw.length());
+    numIntersections, lastRawIntersections,
+    gHasBoundary ? "true" : "false", numBoundary,
+    (int)gAbLinesRaw.length());
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
   webServer.send(200, "application/json", out);
 }
