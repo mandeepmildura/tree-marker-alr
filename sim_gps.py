@@ -12,8 +12,8 @@ Stop: Ctrl-C
 import socket, time, math
 
 # ── Match these to tree_marker.ino config ─────────────────────────
-ORIGIN_LAT   = -34.200000
-ORIGIN_LON   =  142.150000
+ORIGIN_LAT   = -34.3166591
+ORIGIN_LON   =  142.1562539
 TREE_SPACING =  3.0        # metres between trees
 NUM_TREES    =  50
 SPEED_MPS    =  1.0        # simulated walk speed (m/s)

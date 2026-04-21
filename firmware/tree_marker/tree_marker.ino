@@ -18,9 +18,12 @@
 #include <Adafruit_SSD1306.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <HTTPClient.h>
+#include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.2.5"
+#define FW_VERSION "1.3.0"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -53,11 +56,20 @@
 #define T_RESTART     "treemarker/restart"
 
 // ── Pin map ───────────────────────────────────────────────────
-#define RELAY_PIN   48
-#define OLED_SDA    39
-#define OLED_SCL    38
-#define SCREEN_W   128
-#define SCREEN_H    64
+#define RELAY_PIN         48
+#define OLED_SDA          39
+#define OLED_SCL          38
+#define SCREEN_W         128
+#define SCREEN_H          64
+#define SETUP_BUTTON_PIN   0       // DL button — hold at boot to force AP mode
+
+// ── AP / setup mode ──────────────────────────────────────────
+#define AP_SSID         "TreeMarker-Setup"
+#define STA_TIMEOUT_MS  20000
+
+// ── GitHub release API ───────────────────────────────────────
+#define GH_LATEST_URL \
+  "https://api.github.com/repos/mandeepMildura/tree-marker-alr/releases/latest"
 
 // ================================================================
 //  MUTABLE CONFIG (loaded from Preferences at boot)
@@ -130,6 +142,10 @@ WiFiClientSecure  tlsClient;
 PubSubClient      mqtt(tlsClient);
 Adafruit_SSD1306  oled(SCREEN_W, SCREEN_H, &Wire, -1);
 WebServer         webServer(80);
+DNSServer         dnsServer;
+bool              apMode = false;
+bool              otaRebootPending = false;
+unsigned long     otaRebootAt = 0;
 
 // ── Grid ──────────────────────────────────────────────────────
 const double M_PER_DEG_LAT = 111320.0;
@@ -306,9 +322,15 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
   </div>
   <div class=card>
     <div class=clbl>Firmware Update (OTA)</div>
+    <button class="btn btn-g" onclick=checkLatest() style="margin-bottom:10px">
+      <span id=lat-btn>Check Latest Release on GitHub</span><span class=bi>&#128269;</span></button>
     <div class=fg><label>Firmware .bin URL (from GitHub Releases)</label><input id=f-ota type=text placeholder="https://github.com/.../releases/download/vX.Y.Z/tree_marker.ino.bin"></div>
-    <button class="btn btn-p" onclick=flashOta()><span>Flash Firmware Now</span><span class=bi>&#8659;</span></button>
-    <p class=note id=ota-status>Board will download, flash, and reboot automatically.</p>
+    <button class="btn btn-p" onclick=flashOta()><span>Flash From URL</span><span class=bi>&#8659;</span></button>
+    <div class=dvd></div>
+    <div class=fg><label>Or upload a .bin file from this computer</label>
+      <input id=f-file type=file accept=".bin"></div>
+    <button class="btn btn-w" onclick=uploadBin()><span>Upload &amp; Flash</span><span class=bi>&#128228;</span></button>
+    <p class=note id=ota-status>Board will reboot automatically after flashing.</p>
   </div>
 </div>
 
@@ -390,9 +412,102 @@ var flashOta=()=>{
     .then(r=>r.text()).then(t=>{st.textContent=t;})
     .catch(e=>{st.textContent='Error: '+e;});
 };
+var checkLatest=()=>{
+  const b=document.getElementById('lat-btn'),st=document.getElementById('ota-status');
+  b.textContent='Checking GitHub...';
+  fetch('/ota/latest').then(r=>r.json()).then(d=>{
+    if(d.error){b.textContent='Check Latest Release on GitHub';st.textContent='Error: '+d.error;return;}
+    b.textContent='Latest: '+d.tag+' (current v'+d.current+')';
+    if(d.url)document.getElementById('f-ota').value=d.url;
+    st.textContent=d.tag&&('v'+d.current)!==d.tag?'Newer release available. Click Flash From URL.':'You are on the latest release.';
+  }).catch(e=>{b.textContent='Check Latest Release on GitHub';st.textContent='Error: '+e;});
+};
+var uploadBin=()=>{
+  const f=document.getElementById('f-file').files[0];
+  if(!f){alert('Pick a .bin file first');return;}
+  if(!confirm('Upload and flash '+f.name+' ('+Math.round(f.size/1024)+' KB)?\nBoard will reboot.'))return;
+  const st=document.getElementById('ota-status');
+  st.textContent='Uploading '+f.name+'...';
+  const fd=new FormData();fd.append('firmware',f,f.name);
+  fetch('/ota/upload',{method:'POST',body:fd})
+    .then(r=>r.text()).then(t=>{st.textContent=t;})
+    .catch(e=>{st.textContent='Upload error: '+e;});
+};
 poll();setInterval(poll,2000);
 </script>
 </body></html>)rawpage";
+
+// ================================================================
+//  AP SETUP PAGE — served when board can't reach saved WiFi
+//  or when DL button held at boot. Minimal, no external fonts.
+// ================================================================
+const char SETUP_PAGE[] PROGMEM = R"rawpage(<!DOCTYPE html>
+<html lang=en>
+<head>
+<meta charset=UTF-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Tree Marker — WiFi Setup</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,Segoe UI,sans-serif}
+body{background:#fcf9f4;color:#1c1c19;padding:20px;min-height:100vh}
+.wrap{max-width:460px;margin:0 auto}
+h1{font-size:22px;margin-bottom:4px}
+.sub{color:#6d7b6c;font-size:13px;margin-bottom:20px}
+.card{background:#fff;border:1px solid #bccbb9;border-radius:12px;padding:18px;margin-bottom:14px}
+.lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#6d7b6c;margin-bottom:10px}
+label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:#6d7b6c;margin:10px 0 4px}
+input,select{width:100%;padding:10px 12px;border:1px solid #bccbb9;border-radius:6px;font-size:14px;background:#f6f3ee}
+input:focus,select:focus{outline:none;border-color:#006e2f;background:#fff}
+button{width:100%;padding:13px;border:none;border-radius:8px;background:#006e2f;color:#fff;font-size:14px;font-weight:700;cursor:pointer;margin-top:14px}
+button:hover{background:#005321}
+button.sec{background:#735a42}
+button.sec:hover{background:#5c4534}
+.note{font-size:11px;color:#6d7b6c;margin-top:10px;line-height:1.5}
+.ssid-row{display:flex;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #f0ede8;font-size:13px;cursor:pointer;border-radius:4px}
+.ssid-row:hover{background:#f6f3ee}
+.ssid-row .rssi{color:#6d7b6c;font-size:11px}
+#scan-list{max-height:220px;overflow-y:auto;margin-top:6px}
+</style></head><body><div class=wrap>
+<h1>Tree Marker Setup</h1>
+<p class=sub>Board can't reach saved WiFi. Pick a network and enter its password.</p>
+<div class=card>
+  <div class=lbl>Available Networks</div>
+  <div id=scan-list>Scanning...</div>
+  <button class=sec onclick=rescan()>Rescan</button>
+</div>
+<div class=card>
+  <div class=lbl>Connect</div>
+  <label>Network (SSID)</label><input id=ssid placeholder="Pick above or type">
+  <label>Password</label><input id=pass type=password placeholder="WiFi password">
+  <label>AgIO UDP Port</label><input id=udp type=number value=8888>
+  <button onclick=save()>Save &amp; Reboot</button>
+  <p class=note>Board will reboot and try to connect. If it fails again the setup AP comes back up.</p>
+</div>
+</div>
+<script>
+var scan=()=>{document.getElementById('scan-list').textContent='Scanning...';
+  fetch('/scan').then(r=>r.json()).then(d=>{
+    var el=document.getElementById('scan-list');el.innerHTML='';
+    if(!d.length){el.textContent='No networks found.';return;}
+    d.forEach(n=>{
+      var row=document.createElement('div');row.className='ssid-row';
+      row.innerHTML='<span>'+n.ssid+(n.sec?' &#128274;':'')+'</span><span class=rssi>'+n.rssi+' dBm</span>';
+      row.onclick=()=>{document.getElementById('ssid').value=n.ssid;document.getElementById('pass').focus();};
+      el.appendChild(row);
+    });
+  }).catch(()=>{document.getElementById('scan-list').textContent='Scan failed.';});};
+var rescan=scan;
+var save=()=>{
+  var s=document.getElementById('ssid').value.trim();
+  var p=document.getElementById('pass').value;
+  var u=+document.getElementById('udp').value||8888;
+  if(!s){alert('Pick or type an SSID');return;}
+  fetch('/config/wifi',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ssid:s,pass:p,udp:u})})
+    .then(r=>r.text()).then(t=>alert(t));
+};
+scan();
+</script></body></html>)rawpage";
 
 // ── AgIO PGN 200 — binary GPS position packet ─────────────────
 // Header: 0x80 0x81 <src> 200 <len>
@@ -613,7 +728,8 @@ void doOTA() {
 // ================================================================
 
 void handleRoot() {
-  webServer.send_P(200, "text/html", PAGE);
+  if (apMode) webServer.send_P(200, "text/html", SETUP_PAGE);
+  else        webServer.send_P(200, "text/html", PAGE);
 }
 
 void handleStatus() {
@@ -712,9 +828,8 @@ void handleConfigWifi() {
   int newPort = (int)jsonFloat(body, "udp");
   if (newPort > 0 && newPort != gUdpPort) {
     gUdpPort = newPort;
-    udp.stop();
-    udp.begin(gUdpPort);
-    Serial.printf("WEB: UDP port changed to %d\n", gUdpPort);
+    if (!apMode) { udp.stop(); udp.begin(gUdpPort); }
+    Serial.printf("WEB: UDP port set to %d\n", gUdpPort);
   }
   saveWifiPrefs();
   webServer.send(200, "text/plain", "Network saved — rebooting in 2s...");
@@ -736,6 +851,175 @@ void handleOtaWeb() {
   Serial.println("WEB: OTA triggered: " + url);
 }
 
+// ── Setup page (served in AP mode at http://192.168.4.1/) ────
+void handleSetup() {
+  webServer.send_P(200, "text/html", SETUP_PAGE);
+}
+
+// ── WiFi scan JSON for setup page ────────────────────────────
+void handleScan() {
+  int n = WiFi.scanNetworks();
+  String out = "[";
+  for (int i = 0; i < n && i < 20; i++) {
+    if (i) out += ",";
+    out += "{\"ssid\":\"";
+    String ssid = WiFi.SSID(i);
+    ssid.replace("\\", "\\\\");
+    ssid.replace("\"", "\\\"");
+    out += ssid;
+    out += "\",\"rssi\":";
+    out += String(WiFi.RSSI(i));
+    out += ",\"sec\":";
+    out += (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "false" : "true";
+    out += "}";
+  }
+  out += "]";
+  WiFi.scanDelete();
+  webServer.send(200, "application/json", out);
+}
+
+// ── Direct .bin upload OTA ────────────────────────────────────
+// The ESP32 WebServer upload handler runs chunk-by-chunk during
+// the POST. We also register a completion handler that fires when
+// the full upload is done.
+void handleOtaUploadEnd() {
+  if (Update.hasError()) {
+    webServer.send(500, "text/plain",
+      String("Upload failed: ") + Update.errorString());
+  } else {
+    webServer.send(200, "text/plain",
+      "Upload OK — rebooting into new firmware");
+    otaRebootPending = true;
+    otaRebootAt = millis() + 1000;
+  }
+}
+
+void handleOtaUploadChunk() {
+  HTTPUpload& up = webServer.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    Serial.printf("OTA upload start: %s\n", up.filename.c_str());
+    if (mqtt.connected()) mqtt.publish(T_OTA_STATUS, "upload-start");
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("OTA upload OK: %u bytes\n", up.totalSize);
+      if (mqtt.connected()) mqtt.publish(T_OTA_STATUS, "upload-success");
+    } else {
+      Update.printError(Serial);
+      if (mqtt.connected()) mqtt.publish(T_OTA_STATUS, "upload-failed");
+    }
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    Serial.println("OTA upload aborted");
+  }
+}
+
+// ── GitHub latest release lookup ─────────────────────────────
+// Hits the releases/latest API, pulls tag_name and the .bin asset URL.
+void handleOtaLatest() {
+  if (WiFi.status() != WL_CONNECTED || apMode) {
+    webServer.send(503, "application/json",
+      "{\"error\":\"No internet in setup mode\"}");
+    return;
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setUserAgent("tree-marker-alr");
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (!http.begin(client, GH_LATEST_URL)) {
+    webServer.send(500, "application/json",
+      "{\"error\":\"http.begin failed\"}");
+    return;
+  }
+  int code = http.GET();
+  if (code != 200) {
+    http.end();
+    char err[80];
+    snprintf(err, sizeof(err), "{\"error\":\"HTTP %d\"}", code);
+    webServer.send(502, "application/json", err);
+    return;
+  }
+  String body = http.getString();
+  http.end();
+
+  // Parse tag_name
+  String tag = "";
+  int ti = body.indexOf("\"tag_name\"");
+  if (ti >= 0) {
+    int q1 = body.indexOf('"', body.indexOf(':', ti)) + 1;
+    int q2 = body.indexOf('"', q1);
+    if (q1 > 0 && q2 > q1) tag = body.substring(q1, q2);
+  }
+  // Find first browser_download_url ending in .bin
+  String binUrl = "";
+  int search = 0;
+  while (true) {
+    int k = body.indexOf("\"browser_download_url\"", search);
+    if (k < 0) break;
+    int q1 = body.indexOf('"', body.indexOf(':', k)) + 1;
+    int q2 = body.indexOf('"', q1);
+    if (q1 > 0 && q2 > q1) {
+      String u = body.substring(q1, q2);
+      if (u.endsWith(".bin")) { binUrl = u; break; }
+    }
+    search = q2 + 1;
+  }
+  char out[600];
+  snprintf(out, sizeof(out),
+    "{\"tag\":\"%s\",\"url\":\"%s\",\"current\":\"%s\"}",
+    tag.c_str(), binUrl.c_str(), FW_VERSION);
+  webServer.send(200, "application/json", out);
+}
+
+// ── Start SoftAP captive-portal setup mode ───────────────────
+void startAP() {
+  apMode = true;
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID);
+  delay(200);
+  IPAddress ip = WiFi.softAPIP();
+  Serial.printf("AP mode: %s @ %s\n", AP_SSID, ip.toString().c_str());
+
+  // Catch-all DNS → AP IP (makes phone/laptop auto-open the setup page)
+  dnsServer.start(53, "*", ip);
+
+  oled.clearDisplay();
+  oled.setCursor(0, 0);
+  oled.setTextSize(1);
+  oled.println("SETUP MODE");
+  oled.println(AP_SSID);
+  oled.println(ip.toString());
+  oled.println("No password");
+  oled.display();
+}
+
+// ── Try STA. Returns true if connected within STA_TIMEOUT_MS. ─
+bool tryStationMode() {
+  if (strlen(gWifiSsid) == 0) return false;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(gWifiSsid, gWifiPass);
+  Serial.printf("WiFi STA: %s", gWifiSsid);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - start > STA_TIMEOUT_MS) {
+      Serial.println(" TIMEOUT");
+      WiFi.disconnect(true, false);
+      return false;
+    }
+    delay(400);
+    Serial.print(".");
+  }
+  Serial.printf("\nWiFi OK  %s\n", WiFi.localIP().toString().c_str());
+  return true;
+}
+
 // ================================================================
 //  SETUP
 // ================================================================
@@ -746,6 +1030,7 @@ void setup() {
 
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
+  pinMode(SETUP_BUTTON_PIN, INPUT_PULLUP);
 
   Wire.begin(OLED_SDA, OLED_SCL);
   if (oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -760,30 +1045,46 @@ void setup() {
   loadPrefs();
   buildGrid();
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(gWifiSsid, gWifiPass);
-  Serial.print("WiFi");
-  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-  Serial.printf("\nWiFi OK  %s\n", WiFi.localIP().toString().c_str());
+  // If DL button is held at boot, force AP setup mode.
+  bool forceAP = (digitalRead(SETUP_BUTTON_PIN) == LOW);
+  if (forceAP) Serial.println("DL button held — forcing AP setup mode");
 
-  // Web server routes
+  if (forceAP || !tryStationMode()) {
+    startAP();
+  }
+
+  // Web server routes — same endpoints in both modes; /scan + /setup
+  // are what the AP setup page uses.
   webServer.on("/",            HTTP_GET,  handleRoot);
+  webServer.on("/setup",       HTTP_GET,  handleSetup);
+  webServer.on("/scan",        HTTP_GET,  handleScan);
   webServer.on("/api/status",  HTTP_GET,  handleStatus);
   webServer.on("/relay",       HTTP_POST, handleRelay);
   webServer.on("/config/grid", HTTP_POST, handleConfigGrid);
   webServer.on("/config/wifi", HTTP_POST, handleConfigWifi);
   webServer.on("/ota",         HTTP_POST, handleOtaWeb);
+  webServer.on("/ota/latest",  HTTP_GET,  handleOtaLatest);
+  webServer.on("/ota/upload",  HTTP_POST, handleOtaUploadEnd, handleOtaUploadChunk);
+  // Captive-portal catch-all: anything unknown in AP mode redirects to setup
+  webServer.onNotFound([]() {
+    if (apMode) { webServer.send_P(200, "text/html", SETUP_PAGE); }
+    else        { webServer.send(404, "text/plain", "Not found"); }
+  });
   webServer.begin();
-  Serial.printf("Web UI: http://%s/\n", WiFi.localIP().toString().c_str());
 
-  udp.begin(gUdpPort);
-  Serial.printf("UDP listening on port %d\n", gUdpPort);
+  if (apMode) {
+    Serial.println("Web UI: http://192.168.4.1/ (setup)");
+  } else {
+    Serial.printf("Web UI: http://%s/\n", WiFi.localIP().toString().c_str());
+    udp.begin(gUdpPort);
+    Serial.printf("UDP listening on port %d\n", gUdpPort);
 
-  tlsClient.setInsecure();
-  mqtt.setServer(gMqttHost, gMqttPort);
-  mqtt.setCallback(mqttCallback);
-  mqtt.setBufferSize(512);
-  mqttConnect();
+    tlsClient.setInsecure();
+    mqtt.setServer(gMqttHost, gMqttPort);
+    mqtt.setCallback(mqttCallback);
+    mqtt.setBufferSize(512);
+    mqttConnect();
+  }
 }
 
 // ================================================================
@@ -798,9 +1099,31 @@ void loop() {
 
   // OTA
   if (otaPending) doOTA();
+  if (otaRebootPending && millis() >= otaRebootAt) {
+    Serial.println("Rebooting after upload OTA...");
+    delay(100);
+    ESP.restart();
+  }
 
-  // Web server
+  // Web server (always)
   webServer.handleClient();
+
+  // AP setup mode: only run web + DNS. Skip GPS / MQTT / OLED updates below.
+  if (apMode) {
+    dnsServer.processNextRequest();
+    static unsigned long lastApOled = 0;
+    if (millis() - lastApOled > 500) {
+      lastApOled = millis();
+      oled.clearDisplay();
+      oled.setCursor(0, 0);
+      oled.setTextSize(1);
+      oled.println("SETUP MODE");
+      oled.println(AP_SSID);
+      oled.println("192.168.4.1");
+      oled.display();
+    }
+    return;
+  }
 
   // MQTT keep-alive
   if (WiFi.status() == WL_CONNECTED) {
@@ -831,6 +1154,7 @@ void loop() {
       char* line = strtok((char*)buf, "\r\n");
       while (line) {
         if (parseGGA(line, lat, lon)) {
+          Serial.printf("[NMEA] lat=%.7f lon=%.7f\n", lat, lon);
           gpsFix = true; curLat = lat; curLon = lon;
           lastFixMs = millis();
           checkGrid(lat, lon);
