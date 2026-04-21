@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.3.2"
+#define FW_VERSION "1.3.3"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -342,6 +342,19 @@ var showTab=(t,btn)=>{
   document.querySelectorAll('.nb').forEach(e=>e.classList.remove('active'));
   document.getElementById('t-'+t).classList.add('active');
   btn.classList.add('active');
+  if(t==='config')fillForm(window._cfg||{});
+};
+var _formFilled=false;
+var fillForm=(c)=>{
+  if(!c||!c.lat)return;
+  ['f-lat','f-lon','f-brg','f-rs','f-ts','f-nr','f-nt','f-hr','f-rp','f-ssid','f-udp'].forEach(id=>{
+    var el=document.getElementById(id);if(!el)return;
+    var key=({'f-lat':'lat','f-lon':'lon','f-brg':'brg','f-rs':'rs','f-ts':'ts',
+              'f-nr':'rows','f-nt':'trees','f-hr':'hr','f-rp':'rp',
+              'f-ssid':'ssid','f-udp':'udp'})[id];
+    el.value=c[key];
+  });
+  _formFilled=true;
 };
 var uptime=(s)=>Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m '+s%60+'s';
 var setv=(id,txt,cls)=>{const e=document.getElementById(id);if(e){e.textContent=txt;if(cls!==undefined)e.className='sv '+(cls?'ok':'bad');}};
@@ -370,17 +383,8 @@ var poll=()=>{
     document.getElementById('c-grid').textContent=c.rows+' x '+c.trees;
     document.getElementById('c-hr').textContent=c.hr+' m';
     document.getElementById('c-rp').textContent=c.rp+' ms';
-    document.getElementById('f-lat').value=c.lat;
-    document.getElementById('f-lon').value=c.lon;
-    document.getElementById('f-brg').value=c.brg;
-    document.getElementById('f-rs').value=c.rs;
-    document.getElementById('f-ts').value=c.ts;
-    document.getElementById('f-nr').value=c.rows;
-    document.getElementById('f-nt').value=c.trees;
-    document.getElementById('f-hr').value=c.hr;
-    document.getElementById('f-rp').value=c.rp;
-    document.getElementById('f-ssid').value=c.ssid;
-    document.getElementById('f-udp').value=c.udp;
+    window._cfg=c;
+    if(!_formFilled)fillForm(c);
   }).catch(()=>{});
 };
 var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
