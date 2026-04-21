@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.3.1"
+#define FW_VERSION "1.3.2"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -160,6 +160,7 @@ bool   relayActive    = false;
 unsigned long relayStart    = 0;
 unsigned long lastHit       = 0;
 int    lastRow   = -1, lastTree  = -1;
+int    insideRow = -1, insideTree = -1;   // tree we're currently inside (debounce)
 double lastDist  =  0;
 double curLat    =  0, curLon   =  0;
 bool   gpsFix    = false;
@@ -563,34 +564,50 @@ double distM(double lat1, double lon1, double lat2, double lon2) {
 }
 
 // ── Grid hit check ────────────────────────────────────────────
+// Fires once per tree *entry*: the tractor must exit a tree's hit
+// radius before it can fire the same tree again. Prevents a stopped
+// tractor from re-triggering the relay every pulse+200ms.
 void checkGrid(double lat, double lon) {
   if (relayActive) return;
-  if (millis() - lastHit < (unsigned long)gRelayPulse + 200) return;
 
+  // Find the nearest tree within hit radius (if any).
+  int nearR = -1, nearT = -1;
+  double nearD = 1e9;
   for (int r = 0; r < gNumRows; r++) {
     for (int t = 0; t < gNumTrees; t++) {
       double d = distM(lat, lon, grid[r][t].lat, grid[r][t].lon);
-      if (d < gHitRadius) {
-        digitalWrite(RELAY_PIN, HIGH);
-        relayActive = true;
-        relayStart  = millis();
-        lastHit     = millis();
-        lastRow     = r;
-        lastTree    = t;
-        lastDist    = d;
-        totalHits++;
-
-        Serial.printf("HIT  Row %-2d  Tree %-3d  %.3fm\n", r, t, d);
-
-        char payload[80];
-        snprintf(payload, sizeof(payload),
-          "{\"row\":%d,\"tree\":%d,\"dist\":%.3f,\"lat\":%.7f,\"lon\":%.7f}",
-          r, t, d, lat, lon);
-        mqtt.publish(T_HIT, payload, true);
-        return;
+      if (d < gHitRadius && d < nearD) {
+        nearD = d; nearR = r; nearT = t;
       }
     }
   }
+
+  // Outside every tree: clear inside-tracker so re-entry can fire again.
+  if (nearR < 0) {
+    insideRow = -1; insideTree = -1;
+    return;
+  }
+  // Same tree as last fire: suppress until we leave its radius.
+  if (nearR == insideRow && nearT == insideTree) return;
+
+  // New tree entered — fire the relay.
+  insideRow = nearR; insideTree = nearT;
+  digitalWrite(RELAY_PIN, HIGH);
+  relayActive = true;
+  relayStart  = millis();
+  lastHit     = millis();
+  lastRow     = nearR;
+  lastTree    = nearT;
+  lastDist    = nearD;
+  totalHits++;
+
+  Serial.printf("HIT  Row %-2d  Tree %-3d  %.3fm\n", nearR, nearT, nearD);
+
+  char payload[80];
+  snprintf(payload, sizeof(payload),
+    "{\"row\":%d,\"tree\":%d,\"dist\":%.3f,\"lat\":%.7f,\"lon\":%.7f}",
+    nearR, nearT, nearD, lat, lon);
+  mqtt.publish(T_HIT, payload, true);
 }
 
 // ── OLED ──────────────────────────────────────────────────────
