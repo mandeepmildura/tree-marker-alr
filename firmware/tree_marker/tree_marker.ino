@@ -223,6 +223,11 @@ double bearingRad, perpBearingRad;
 struct Point { double lat; double lon; };
 Point grid[20][100];   // [row][tree]  max 20x100
 
+// AB-mode intersection store (declared here so checkGrid() can reference it).
+struct IPt { float e; float n; };
+IPt  intersections[MAX_INTERSECTIONS];
+int  numIntersections = 0;
+
 // ── State ─────────────────────────────────────────────────────
 bool   relayActive    = false;
 unsigned long relayStart    = 0;
@@ -850,11 +855,8 @@ void buildGrid() {
 
 // ================================================================
 //  AB MODE — cross-AB intersection grid imported from AgOpenGPS
+//  (intersections[] / numIntersections declared above near grid[])
 // ================================================================
-
-struct IPt { float e; float n; };
-IPt  intersections[MAX_INTERSECTIONS];
-int  numIntersections = 0;
 
 // ── WGS84 → UTM forward projection ────────────────────────────
 // Standard UTM formulas. Zone comes from AOG's Field.txt.
