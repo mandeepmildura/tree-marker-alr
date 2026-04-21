@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.3"
+#define FW_VERSION "1.4.4"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -277,7 +277,14 @@ bool   relayActive    = false;
 unsigned long relayStart    = 0;
 unsigned long lastHit       = 0;
 int    lastRow   = -1, lastTree  = -1;
-int    insideRow = -1, insideTree = -1;   // tree we're currently inside (debounce)
+// Closest-approach tracker (v1.4.4+). Replaces the older inside-radius debounce.
+// approachIdx: flat tree index (r*numTrees+t) we're currently approaching.
+// approachMinD: smallest distance seen since approachIdx was locked.
+// approachFired: set after a fire so the same tree can't re-fire until the
+//                tractor moves out of range (nearIdx < 0 clears everything).
+int    approachIdx   = -1;
+float  approachMinD  = 1e9f;
+bool   approachFired = false;
 double lastDist  =  0;
 double curLat    =  0, curLon   =  0;
 bool   gpsFix    = false;
@@ -908,15 +915,26 @@ double distM(double lat1, double lon1, double lat2, double lon2) {
   return sqrt(dLat * dLat + dLon * dLon);
 }
 
-// ── Grid hit check ────────────────────────────────────────────
-// Fires once per tree *entry*: the tractor must exit a tree's hit
-// radius before it can fire the same tree again. Prevents a stopped
-// tractor from re-triggering the relay every pulse+200ms.
+// ── Grid hit check — closest-approach detection ─────────────
+// Rather than fire the moment the tractor enters a tree's radius,
+// we track the minimum distance to the nearest tree and fire the
+// instant that minimum stops decreasing. That's the geometric
+// moment the nozzle was actually closest — nothing fuzzy about it.
+//
+// gHitRadius is reinterpreted as a *pass threshold*: closest
+// approaches that exceed gHitRadius are ignored (e.g. driving
+// between two rows, a tree in the next row might be 3m away at
+// its closest but we don't want to fire). The search itself looks
+// farther out so we can track a tree during approach.
 void checkGrid(double lat, double lon) {
   if (relayActive) return;
 
-  // Find the nearest tree within hit radius (if any).
-  int nearR = -1, nearT = -1;
+  // Search radius wider than fire threshold so we can "see" the tree
+  // on approach. 2.5× radius + 0.5m gives a comfortable buffer at
+  // sim speed (1 m/s, 10 Hz fixes = 0.1 m per update).
+  const double SEARCH_RANGE = gHitRadius * 2.5 + 0.5;
+
+  int nearIdx = -1, nearR = -1, nearT = -1;
   double nearD = 1e9;
 
   if (gGridMode == MODE_AB) {
@@ -927,8 +945,8 @@ void checkGrid(double lat, double lon) {
       double de = le - intersections[i].e;
       double dn = ln - intersections[i].n;
       double d  = sqrt(de*de + dn*dn);
-      if (d < gHitRadius && d < nearD) {
-        nearD = d;
+      if (d < SEARCH_RANGE && d < nearD) {
+        nearD = d; nearIdx = i;
         nearR = i / gNumTrees;
         nearT = i % gNumTrees;
       }
@@ -937,44 +955,68 @@ void checkGrid(double lat, double lon) {
     for (int r = 0; r < gNumRows; r++) {
       for (int t = 0; t < gNumTrees; t++) {
         double d = distM(lat, lon, grid[r][t].lat, grid[r][t].lon);
-        if (d < gHitRadius && d < nearD) {
+        if (d < SEARCH_RANGE && d < nearD) {
           nearD = d; nearR = r; nearT = t;
+          nearIdx = r * gNumTrees + t;
         }
       }
     }
   }
 
-  // Outside every tree: clear inside-tracker so re-entry can fire again.
-  if (nearR < 0) {
-    insideRow = -1; insideTree = -1;
+  // No tree within search range → we're between rows / outside the
+  // grid. Clear the approach tracker fully.
+  if (nearIdx < 0) {
+    approachIdx   = -1;
+    approachMinD  = 1e9f;
+    approachFired = false;
     return;
   }
-  // Same tree as last fire: suppress until we leave its radius.
-  if (nearR == insideRow && nearT == insideTree) return;
 
-  // New tree entered — fire the relay.
-  insideRow = nearR; insideTree = nearT;
-  digitalWrite(RELAY_PIN, HIGH);
-  relayActive = true;
-  relayStart  = millis();
-  lastHit     = millis();
-  lastRow     = nearR;
-  lastTree    = nearT;
-  lastDist    = nearD;
-  totalHits++;
+  // Switched to a different nearest tree → lock focus on the new one.
+  if (nearIdx != approachIdx) {
+    approachIdx   = nearIdx;
+    approachMinD  = nearD;
+    approachFired = false;
+    return;
+  }
 
-  Serial.printf("HIT  Row %-2d  Tree %-3d  %.3fm\n", nearR, nearT, nearD);
+  // Already fired on this tree this pass → wait for tractor to leave range.
+  if (approachFired) return;
 
-  // Record in the ring buffer for the dashboard
-  hitLog[hitLogHead] = { nearR, nearT, (float)nearD, lat, lon, millis() };
-  hitLogHead = (hitLogHead + 1) % HIT_LOG_CAP;
-  if (hitLogCount < HIT_LOG_CAP) hitLogCount++;
+  // Same tree, distance still dropping → update the minimum. Small
+  // epsilon (5 mm) ignores GPS noise at steady distance.
+  if (nearD < approachMinD - 0.005) {
+    approachMinD = (float)nearD;
+    return;
+  }
 
-  char payload[80];
-  snprintf(payload, sizeof(payload),
-    "{\"row\":%d,\"tree\":%d,\"dist\":%.3f,\"lat\":%.7f,\"lon\":%.7f}",
-    nearR, nearT, nearD, lat, lon);
-  mqtt.publish(T_HIT, payload, true);
+  // Same tree, distance starting to grow → closest point was one fix ago.
+  // Fire only if that closest approach was actually within the pass
+  // threshold (gHitRadius). A 1 cm hysteresis avoids flapping on noise.
+  if (nearD > approachMinD + 0.01 && approachMinD <= gHitRadius) {
+    digitalWrite(RELAY_PIN, HIGH);
+    relayActive = true;
+    relayStart  = millis();
+    lastHit     = millis();
+    lastRow     = nearR;
+    lastTree    = nearT;
+    lastDist    = approachMinD;
+    totalHits++;
+    approachFired = true;
+
+    Serial.printf("HIT  Row %-2d  Tree %-3d  closest=%.3fm\n",
+                  nearR, nearT, approachMinD);
+
+    hitLog[hitLogHead] = { nearR, nearT, (float)approachMinD, lat, lon, millis() };
+    hitLogHead = (hitLogHead + 1) % HIT_LOG_CAP;
+    if (hitLogCount < HIT_LOG_CAP) hitLogCount++;
+
+    char payload[80];
+    snprintf(payload, sizeof(payload),
+      "{\"row\":%d,\"tree\":%d,\"dist\":%.3f,\"lat\":%.7f,\"lon\":%.7f}",
+      nearR, nearT, approachMinD, lat, lon);
+    mqtt.publish(T_HIT, payload, true);
+  }
 }
 
 // ── OLED ──────────────────────────────────────────────────────
