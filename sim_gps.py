@@ -14,10 +14,11 @@ import socket, time, math
 # ── Match these to tree_marker.ino config ─────────────────────────
 ORIGIN_LAT   = -34.3166591
 ORIGIN_LON   =  142.1562539
+ROW_BEARING  = 180.0       # degrees — must match tree_marker.ino
 TREE_SPACING =  3.0        # metres between trees
 NUM_TREES    =  50
 SPEED_MPS    =  1.0        # simulated walk speed (m/s)
-UDP_IP       = "172.20.10.3"   # ALR board direct IP (avoids broadcast subnet issues)
+UDP_IP       = "192.168.1.232"   # ALR board direct IP (NETGEAR94)
 UDP_PORT     = 8888
 INTERVAL     = 0.1         # seconds between sentences (10 Hz)
 # ──────────────────────────────────────────────────────────────────
@@ -63,10 +64,15 @@ print("Press Ctrl-C to stop\n")
 dist = 0.0          # metres east of origin
 step = SPEED_MPS * INTERVAL
 
+brg_rad = math.radians(ROW_BEARING)
+
 try:
     while dist <= TREE_SPACING * NUM_TREES:
-        lat = ORIGIN_LAT
-        lon = ORIGIN_LON + dist / metres_to_deg_lon(ORIGIN_LAT)
+        # Walk along ROW_BEARING from origin
+        dlat_m = dist * math.cos(brg_rad)
+        dlon_m = dist * math.sin(brg_rad)
+        lat = ORIGIN_LAT + dlat_m / METRES_PER_DEG_LAT
+        lon = ORIGIN_LON + dlon_m / metres_to_deg_lon(ORIGIN_LAT)
         sentence = make_gngga(lat, lon)
         sock.sendto(sentence.encode(), (UDP_IP, UDP_PORT))
         tree_idx = dist / TREE_SPACING

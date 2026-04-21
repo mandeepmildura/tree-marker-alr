@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.3.0"
+#define FW_VERSION "1.3.1"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -509,20 +509,23 @@ var save=()=>{
 scan();
 </script></body></html>)rawpage";
 
-// ── AgIO PGN 200 — binary GPS position packet ─────────────────
-// Header: 0x80 0x81 <src> 200 <len>
-// Data:   int32 lat*1e7 LE, int32 lon*1e7 LE  (+ optional heading/speed/fix)
-bool parsePGN200(uint8_t* buf, int len, double& lat, double& lon) {
-  if (len < 13) return false;
+// ── AgOpenGPS PGN 100 (0x64) — NAV position from AOG ─────────
+// AOG broadcasts this 30-byte packet to modules in both real-RTK
+// and simulator mode. Payload is 24 bytes:
+//   [0..7]   longitude  (double, little-endian)
+//   [8..15]  latitude   (double, little-endian)
+//   [16..23] heading / speed / flags (not used here)
+// Header: 0x80 0x81 <src=0x7F> 0x64 0x18 <payload..> <CRC>
+bool parsePGN100(uint8_t* buf, int len, double& lat, double& lon) {
+  if (len < 30) return false;
   if (buf[0] != 0x80 || buf[1] != 0x81) return false;
-  if (buf[3] != 200) return false;
-  int32_t latI, lonI;
-  memcpy(&latI, &buf[5], 4);
-  memcpy(&lonI, &buf[9], 4);
-  lat = latI / 10000000.0;
-  lon = lonI / 10000000.0;
-  // sanity check — reject obviously bogus positions
-  if (lat == 0.0 && lon == 0.0) return false;
+  if (buf[3] != 0x64) return false;     // PGN 100
+  if (buf[4] != 0x18) return false;     // 24-byte payload
+  memcpy(&lon, &buf[5],  8);
+  memcpy(&lat, &buf[13], 8);
+  if (lat < -90.0 || lat > 90.0)   return false;
+  if (lon < -180.0 || lon > 180.0) return false;
+  if (lat == 0.0 && lon == 0.0)    return false;
   return true;
 }
 
@@ -1131,30 +1134,23 @@ void loop() {
     mqtt.loop();
   }
 
-  // Read UDP from AgIO
+  // Read UDP from AgIO / AgOpenGPS
   int pkt = udp.parsePacket();
   if (pkt > 0) {
     uint8_t buf[256];
     int len = udp.read(buf, sizeof(buf) - 1);
-    // DEBUG: dump first 20 bytes of every UDP packet
-    Serial.printf("[UDP] len=%d from %s:%d  bytes:", len,
-                  udp.remoteIP().toString().c_str(), udp.remotePort());
-    for (int i = 0; i < min(len, 20); i++) Serial.printf(" %02X", buf[i]);
-    Serial.println();
     double lat, lon;
-    if (parsePGN200(buf, len, lat, lon)) {
-      // Binary AgIO PGN 200
-      Serial.printf("[PGN200] lat=%.7f lon=%.7f\n", lat, lon);
+    if (parsePGN100(buf, len, lat, lon)) {
+      // AOG NAV PGN 100 — works in RTK and simulator mode
       gpsFix = true; curLat = lat; curLon = lon;
       lastFixMs = millis();
       checkGrid(lat, lon);
     } else {
-      // Fallback: NMEA text ($GNGGA / $GPGGA)
+      // Fallback: NMEA text ($GNGGA / $GPGGA) if AgIO NMEA-out enabled
       buf[len] = '\0';
       char* line = strtok((char*)buf, "\r\n");
       while (line) {
         if (parseGGA(line, lat, lon)) {
-          Serial.printf("[NMEA] lat=%.7f lon=%.7f\n", lat, lon);
           gpsFix = true; curLat = lat; curLon = lon;
           lastFixMs = millis();
           checkGrid(lat, lon);
