@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.11"
+#define FW_VERSION "1.4.12"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -537,11 +537,11 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     </div>
     <div class="subhead" style="margin-top:14px">Plant Pattern &amp; Detection</div>
     <div class=g2>
-      <div class="fg simple-only"><label>Row Spacing (m)</label><input id=f-rs type=number step=0.1></div>
-      <div class="fg simple-only"><label>Tree Spacing (m)</label><input id=f-ts type=number step=0.1></div>
+      <div class=fg><label>Row Spacing (m)</label><input id=f-rs type=number step=0.1></div>
+      <div class=fg><label>Tree Spacing (m)</label><input id=f-ts type=number step=0.1></div>
       <div class="fg simple-only"><label>Hit Radius (m)</label><input id=f-hr type=number step=0.01></div>
-      <div class="fg simple-only"><label>Number of Rows (max 20)</label><input id=f-nr type=number step=1 min=1 max=20></div>
-      <div class="fg simple-only"><label>Trees per Row (max 100)</label><input id=f-nt type=number step=1 min=1 max=100></div>
+      <div class=fg><label>Number of Rows (max 20)</label><input id=f-nr type=number step=1 min=1 max=20></div>
+      <div class=fg><label>Trees per Row (max 100)</label><input id=f-nt type=number step=1 min=1 max=100></div>
       <div class=fg style="grid-column:1/-1"><label>Relay Pulse (ms) &mdash; always editable</label><input id=f-rp type=number step=50></div>
     </div>
     <button class="btn btn-p" id=save-grid-btn onclick=saveGrid() style="margin-top:10px"><span>Save Grid + Apply Now</span><span class=bi>&#10003;</span></button>
@@ -879,11 +879,13 @@ var applyModeUi=(c)=>{
   if(abActive){
     banner.className='mode-banner ab';
     banner.innerHTML='<b>Mode: AB (from AgOpenGPS)</b><br>'+
-      'Grid geometry is driven entirely by your AB lines (and optional boundary). '+
-      'Only <b>Relay Pulse</b> is editable here in AB mode &mdash; everything else comes from AgOpenGPS. '+
-      'To edit the other parameters manually, switch to Simple mode on the Field tab.';
+      '<b>Origin &amp; Bearing</b> come from the AB-line intersection &mdash; disabled here. '+
+      '<b>Row/Tree Spacing</b> and <b>counts</b> stay editable because ABLines.txt doesn\'t carry spacing info. '+
+      '<b>Relay Pulse</b> is always editable.<br>'+
+      '<span style="color:var(--mu)">Convention: in AgOpenGPS, draw both AB lines so the A point sits on the first tree of the first row. '+
+      'The grid then extends from that corner along each line.</span>';
     if(subhead) subhead.style.opacity='.5';
-    if(note) note.textContent='Only Relay Pulse is saved in AB mode. Other grid parameters come from AgOpenGPS.';
+    if(note) note.textContent='Spacings and counts rebuild the grid instantly in AB mode. Origin/Bearing come from the AB lines.';
   } else {
     banner.className='mode-banner';
     banner.innerHTML='<b>Mode: Simple</b> &mdash; all Grid Parameters below are active. '+
