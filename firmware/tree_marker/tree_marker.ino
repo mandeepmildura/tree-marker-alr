@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.5"
+#define FW_VERSION "1.4.6"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -370,6 +370,10 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
 .fg input{width:100%;background:var(--sl);border:1px solid transparent;border-bottom-color:var(--ol);border-radius:6px 6px 0 0;padding:9px 12px;font-family:'Manrope',sans-serif;font-size:13px;font-weight:600;color:var(--tx);outline:none;transition:all .2s}
 .fg input:focus{background:var(--wh);border-bottom-color:var(--pr);border-color:var(--ol)}
 .note{font-size:11px;color:var(--mu);margin-top:8px}
+.map-compass{background:rgba(255,255,255,.92);border:2px solid var(--pr);border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none;margin:0 0 16px 16px !important}
+.tractor-arrow{background:transparent !important;border:none !important}
+.tractor-lbl{position:absolute;top:26px;left:50%;transform:translateX(-50%);white-space:nowrap;background:rgba(3,105,161,.95);color:#fff;font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.3);letter-spacing:.3px}
+.nozzle-dot{background:transparent !important;border:none !important}
 </style>
 </head>
 <body>
@@ -450,11 +454,13 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
   <div class=card style="padding:0;overflow:hidden">
     <div id=map style="height:520px;width:100%;background:#f0ede8"></div>
   </div>
-  <p class=note style="margin-top:10px">
-    <span style="color:#ca8a04;font-weight:700">Yellow</span> = planned trees &nbsp;
-    <span style="color:var(--pb);font-weight:700">Green</span> = hits fired &nbsp;
-    <span style="color:#0369a1;font-weight:700">Blue</span> = tractor &nbsp;
-    <span style="color:var(--pr);font-weight:700">Green dashed</span> = field boundary
+  <p class=note style="margin-top:10px;line-height:1.8">
+    <span style="color:#ca8a04;font-weight:700">&#x25CF; Yellow</span> = planned trees &nbsp;
+    <span style="color:var(--pb);font-weight:700">&#x25CF; Green</span> = hits fired &nbsp;
+    <span style="color:#0369a1;font-weight:700">&#x25B2; Blue arrow</span> = tractor (points in direction of travel, heading shown below) &nbsp;
+    <span style="color:#a16207;font-weight:700">&#x25CF; Amber</span> = virtual nozzle (only shown when offset &ne; 0 &mdash; this is where paint lands) &nbsp;
+    <span style="color:var(--pr);font-weight:700">&#x2B1A; Green dashed</span> = field boundary &nbsp;
+    <span style="color:var(--tv);font-weight:700">&#x1F9ED; Compass</span> = map is north-up (bottom-left corner)
   </p>
 </div>
 
@@ -563,7 +569,23 @@ var showTab=(t,btn)=>{
   if(t==='status')fetchHits();
   if(t==='map')initMap();
 };
-var _leafletReady=false,_mapInst=null,_mapLayers={grid:null,hits:null,tractor:null,boundary:null};
+var _leafletReady=false,_mapInst=null,_mapLayers={grid:null,hits:null,tractor:null,nozzle:null,boundary:null};
+var _compassSvg='<svg viewBox="0 0 60 60" width=54 height=54 xmlns="http://www.w3.org/2000/svg">'+
+  '<circle cx=30 cy=30 r=27 fill="rgba(255,255,255,.95)"/>'+
+  '<polygon points="30,6 24,30 36,30" fill="#ba1a1a"/>'+
+  '<polygon points="30,54 24,30 36,30" fill="#6d7b6c"/>'+
+  '<circle cx=30 cy=30 r=3 fill="#1c1c19"/>'+
+  '<text x=30 y=16 font-size=11 font-weight=700 fill="#fff" text-anchor="middle" font-family="Space Grotesk,sans-serif">N</text>'+
+  '<text x=30 y=50 font-size=9 font-weight=700 fill="#1c1c19" text-anchor="middle" font-family="Space Grotesk,sans-serif">S</text>'+
+  '<text x=50 y=34 font-size=9 font-weight=700 fill="#1c1c19" text-anchor="middle" font-family="Space Grotesk,sans-serif">E</text>'+
+  '<text x=10 y=34 font-size=9 font-weight=700 fill="#1c1c19" text-anchor="middle" font-family="Space Grotesk,sans-serif">W</text>'+
+  '</svg>';
+var _hdgLabel=(h)=>{var d=((h%360)+360)%360;var dirs=['N','NE','E','SE','S','SW','W','NW'];var idx=Math.round(d/45)%8;return d.toFixed(0)+'\u00B0 '+dirs[idx];};
+var _tractorSvg=(h)=>'<div style="position:relative;width:28px;height:28px"><div style="width:28px;height:28px;transform:rotate('+(h||0)+'deg);transform-origin:50% 50%">'+
+  '<svg viewBox="0 0 28 28" width=28 height=28 xmlns="http://www.w3.org/2000/svg">'+
+    '<circle cx=14 cy=14 r=11 fill="#38bdf8" stroke="#0369a1" stroke-width=2.5 fill-opacity=.85/>'+
+    '<polygon points="14,3 7,16 14,13 21,16" fill="#0c2447" stroke="#fff" stroke-width=1 stroke-linejoin=round/>'+
+  '</svg></div><div class="tractor-lbl">'+_hdgLabel(h||0)+'</div></div>';
 var loadLeaflet=()=>new Promise((ok,ng)=>{
   if(_leafletReady){ok();return;}
   var css=document.createElement('link');css.rel='stylesheet';
@@ -585,6 +607,8 @@ var initMap=async()=>{
   var osm=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     {attribution:'&copy; OpenStreetMap',maxNativeZoom:19,maxZoom:20});
   L.control.layers({'Satellite':sat,'Dark':dark,'Street':osm},{},{position:'topright'}).addTo(_mapInst);
+  var Compass=L.Control.extend({onAdd:function(){var d=L.DomUtil.create('div','map-compass');d.innerHTML=_compassSvg;return d;},onRemove:function(){}});
+  new Compass({position:'bottomleft'}).addTo(_mapInst);
   _mapInst.setView([-34.3,142.15],16);
   await refreshMapGrid();
 };
@@ -614,13 +638,34 @@ var refreshMapGrid=async()=>{
     }
   }catch(e){console.error('grid fetch failed',e);}
 };
-var updateMapTractor=(lat,lon,fix)=>{
+var updateMapTractor=(lat,lon,fix,hdg,fa,latOff)=>{
   if(!_mapInst)return;
   if(_mapLayers.tractor){_mapInst.removeLayer(_mapLayers.tractor);_mapLayers.tractor=null;}
+  if(_mapLayers.nozzle){_mapInst.removeLayer(_mapLayers.nozzle);_mapLayers.nozzle=null;}
   if(!fix)return;
-  _mapLayers.tractor=L.circleMarker([lat,lon],
-    {radius:8,color:'#0369a1',weight:2,fillColor:'#38bdf8',fillOpacity:0.9,className:'tractor-pulse'})
-    .bindTooltip('Tractor',{direction:'top',offset:[0,-8]}).addTo(_mapInst);
+  var h=hdg||0;
+  var ic=L.divIcon({className:'tractor-arrow',iconSize:[28,28],iconAnchor:[14,14],html:_tractorSvg(h)});
+  _mapLayers.tractor=L.marker([lat,lon],{icon:ic,title:'Tractor heading '+_hdgLabel(h)}).addTo(_mapInst);
+  // Draw virtual nozzle position (where relay will fire) if an offset is configured
+  if((Math.abs(fa||0)>0.01)||(Math.abs(latOff||0)>0.01)){
+    var rad=h*Math.PI/180;
+    var sn=Math.sin(rad), cs=Math.cos(rad);
+    // fa positive = BEHIND antenna; lat_off positive = RIGHT of antenna
+    var nE=-(fa||0)*sn + (latOff||0)*cs;
+    var nN=-(fa||0)*cs - (latOff||0)*sn;
+    var dLat=nN/111320, dLon=nE/(111320*Math.cos(lat*Math.PI/180));
+    var nlat=lat+dLat, nlon=lon+dLon;
+    var nSvg='<svg viewBox="0 0 18 18" width=18 height=18 xmlns="http://www.w3.org/2000/svg">'+
+      '<circle cx=9 cy=9 r=6 fill="#facc15" stroke="#a16207" stroke-width=2/>'+
+      '<circle cx=9 cy=9 r=2 fill="#a16207"/></svg>';
+    var nic=L.divIcon({className:'nozzle-dot',iconSize:[18,18],iconAnchor:[9,9],html:nSvg});
+    var grp=L.layerGroup();
+    L.polyline([[lat,lon],[nlat,nlon]],{color:'#a16207',weight:2,dashArray:'3 3'}).addTo(grp);
+    L.marker([nlat,nlon],{icon:nic,title:'Virtual nozzle (paint point)'})
+      .bindTooltip('Nozzle (F/A '+(fa||0).toFixed(2)+'m, Lat '+(latOff||0).toFixed(2)+'m)',{direction:'top',offset:[0,-9]}).addTo(grp);
+    grp.addTo(_mapInst);
+    _mapLayers.nozzle=grp;
+  }
 };
 var updateMapHits=(hits)=>{
   if(!_mapInst)return;
@@ -762,7 +807,7 @@ var poll=()=>{
     // Refresh hit log when count changes or once on initial load.
     if(d.hits!==_lastHitCount){_lastHitCount=d.hits;fetchHits();}
     // Live tractor marker on the map (only effective if map tab has loaded)
-    updateMapTractor(d.lat,d.lon,d.fix);
+    updateMapTractor(d.lat,d.lon,d.fix,d.hdg,c&&c.fa,c&&c.lat_off);
   }).catch(()=>{});
 };
 var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
