@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.10"
+#define FW_VERSION "1.4.11"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -130,6 +130,8 @@ double gRowE, gRowN, gRowHdg;     // selected row AB line: point + heading(deg)
 double gTreeE, gTreeN, gTreeHdg;  // selected tree AB line: point + heading(deg)
 bool   gHasField  = false;        // true once Field.txt offsets are stored
 bool   gHasLines  = false;        // true once both AB lines are selected
+double gAbOriginE = 0;            // intersection of the two AB lines (row0/tree0) in local E/N
+double gAbOriginN = 0;            // set by resolveActiveABLines()
 
 // Raw ABLines.txt text held in RAM so user can re-pick lines without
 // re-uploading. Persisted in NVS as "ab_raw" (<=3800 chars).
@@ -473,6 +475,8 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     <span style="color:var(--pb);font-weight:700">&#x25CF; Green</span> = hits fired &nbsp;
     <span style="color:#0369a1;font-weight:700">&#x25B2; Blue arrow</span> = tractor (points in direction of travel, heading shown below) &nbsp;
     <span style="color:#a16207;font-weight:700">&#x25CF; Amber</span> = virtual nozzle (only shown when offset &ne; 0 &mdash; this is where paint lands) &nbsp;
+    <span style="color:#b91c1c;font-weight:700">&mdash; Red dashed</span> = Row AB line (AB mode) &nbsp;
+    <span style="color:#7e22ce;font-weight:700">&mdash; Purple dashed</span> = Tree AB line (AB mode) &nbsp;
     <span style="color:var(--pr);font-weight:700">&#x2B1A; Green dashed</span> = field boundary &nbsp;
     <span style="color:var(--tv);font-weight:700">&#x1F9ED; Compass</span> = map is north-up (bottom-left corner)
   </p>
@@ -538,7 +542,7 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
       <div class="fg simple-only"><label>Hit Radius (m)</label><input id=f-hr type=number step=0.01></div>
       <div class="fg simple-only"><label>Number of Rows (max 20)</label><input id=f-nr type=number step=1 min=1 max=20></div>
       <div class="fg simple-only"><label>Trees per Row (max 100)</label><input id=f-nt type=number step=1 min=1 max=100></div>
-      <div class="fg simple-only" style="grid-column:1/-1"><label>Relay Pulse (ms)</label><input id=f-rp type=number step=50></div>
+      <div class=fg style="grid-column:1/-1"><label>Relay Pulse (ms) &mdash; always editable</label><input id=f-rp type=number step=50></div>
     </div>
     <button class="btn btn-p" id=save-grid-btn onclick=saveGrid() style="margin-top:10px"><span>Save Grid + Apply Now</span><span class=bi>&#10003;</span></button>
     <p class=note id=save-grid-note>Grid rebuilds immediately &mdash; no reboot needed.</p>
@@ -588,7 +592,7 @@ var showTab=(t,btn)=>{
   if(t==='status')fetchHits();
   if(t==='map')initMap();
 };
-var _leafletReady=false,_mapInst=null,_mapLayers={grid:null,hits:null,tractor:null,nozzle:null,boundary:null};
+var _leafletReady=false,_mapInst=null,_mapLayers={grid:null,hits:null,tractor:null,nozzle:null,boundary:null,abLines:null};
 var _compassSvg='<svg viewBox="0 0 60 60" width=54 height=54 xmlns="http://www.w3.org/2000/svg">'+
   '<circle cx=30 cy=30 r=27 fill="rgba(255,255,255,.95)"/>'+
   '<polygon points="30,6 24,30 36,30" fill="#ba1a1a"/>'+
@@ -637,11 +641,27 @@ var refreshMapGrid=async()=>{
     var r=await fetch('/api/grid').then(r=>r.json());
     if(_mapLayers.grid)_mapInst.removeLayer(_mapLayers.grid);
     if(_mapLayers.boundary)_mapInst.removeLayer(_mapLayers.boundary);
+    if(_mapLayers.abLines)_mapInst.removeLayer(_mapLayers.abLines);
     // Boundary polygon (if present) — draw under the trees
     if(r.boundary&&r.boundary.length>=3){
       _mapLayers.boundary=L.polygon(r.boundary,
         {color:'#006e2f',weight:2,fillColor:'#006e2f',fillOpacity:0.08,dashArray:'6 4'})
         .bindTooltip('Field boundary ('+r.boundary.length+' vertices)').addTo(_mapInst);
+    }
+    // AB lines imported from AgOpenGPS — makes alignment errors visible
+    var abg=null;
+    if((r.rowLine&&r.rowLine.length>=2)||(r.treeLine&&r.treeLine.length>=2)){
+      abg=L.layerGroup();
+      if(r.rowLine&&r.rowLine.length>=2){
+        L.polyline(r.rowLine,{color:'#b91c1c',weight:3,opacity:0.85,dashArray:'10 5'})
+          .bindTooltip('Row AB line (trees run along this)',{sticky:true}).addTo(abg);
+      }
+      if(r.treeLine&&r.treeLine.length>=2){
+        L.polyline(r.treeLine,{color:'#7e22ce',weight:3,opacity:0.85,dashArray:'10 5'})
+          .bindTooltip('Tree AB line (rows stack along this)',{sticky:true}).addTo(abg);
+      }
+      abg.addTo(_mapInst);
+      _mapLayers.abLines=abg;
     }
     var lg=L.layerGroup();
     r.points.forEach(p=>{
@@ -854,19 +874,16 @@ var applyModeUi=(c)=>{
     el.classList.toggle('disabled',abActive);
     var inp=el.querySelector('input'); if(inp) inp.disabled=abActive;
   });
-  if(btn) btn.disabled=abActive;
+  // Save button stays enabled in AB mode so Relay Pulse can still be saved.
+  if(btn) btn.disabled=false;
   if(abActive){
     banner.className='mode-banner ab';
-    var aLat=(c.anchorLat!==undefined?c.anchorLat:0).toFixed(7);
-    var aLon=(c.anchorLon!==undefined?c.anchorLon:0).toFixed(7);
-    var rHdg=(c.rowHdg!==undefined?c.rowHdg:0).toFixed(1);
     banner.innerHTML='<b>Mode: AB (from AgOpenGPS)</b><br>'+
-      'All Grid Parameters below are disabled in AB mode &mdash; the grid is driven entirely by your AB lines and (optionally) a boundary. '+
-      'To edit them manually, switch to Simple mode on the Field tab.<br>'+
-      '<span style="color:var(--mu)">Active anchor: <code>'+aLat+', '+aLon+'</code> &middot; '+
-      'Row heading: <code>'+rHdg+'°</code></span>';
+      'Grid geometry is driven entirely by your AB lines (and optional boundary). '+
+      'Only <b>Relay Pulse</b> is editable here in AB mode &mdash; everything else comes from AgOpenGPS. '+
+      'To edit the other parameters manually, switch to Simple mode on the Field tab.';
     if(subhead) subhead.style.opacity='.5';
-    if(note) note.textContent='Switch to Simple mode on the Field tab to edit grid parameters.';
+    if(note) note.textContent='Only Relay Pulse is saved in AB mode. Other grid parameters come from AgOpenGPS.';
   } else {
     banner.className='mode-banner';
     banner.innerHTML='<b>Mode: Simple</b> &mdash; all Grid Parameters below are active. '+
@@ -1502,10 +1519,11 @@ bool pointInBoundary(double e, double n) {
 }
 
 // ── Build the AB-mode intersection grid ───────────────────────
-// Row AB  defines direction along which trees sit (gNumTrees trees along).
-// Tree AB defines the perpendicular that spaces rows (gNumRows rows across).
-// Intersections grow outward from the "row 0 tree 0" corner in the
-// direction of each line's heading.
+// Origin (row 0 / tree 0) = intersection of the Row and Tree AB lines,
+// computed once in resolveActiveABLines() as gAbOriginE/N.
+// Trees step ALONG the Row line (gTreeSpacing between trees).
+// Rows step ALONG the Tree line (gRowSpacing between rows).
+// Works correctly even if the two AB lines aren't exactly 90° apart.
 void buildAbIntersections() {
   numIntersections = 0;
   lastRawIntersections = 0;
@@ -1513,36 +1531,17 @@ void buildAbIntersections() {
 
   double rowHdgR  = gRowHdg  * M_PI / 180.0;
   double treeHdgR = gTreeHdg * M_PI / 180.0;
+  double rowDE  = sin(rowHdgR),  rowDN  = cos(rowHdgR);
+  double treeDE = sin(treeHdgR), treeDN = cos(treeHdgR);
 
-  // Direction unit vectors (AOG uses heading where sin/cos map to E/N):
-  double rowDE  = sin(rowHdgR);   double rowDN  = cos(rowHdgR);
-  double treeDE = sin(treeHdgR);  double treeDN = cos(treeHdgR);
-
-  // Perpendicular-to-row vector (for stepping across rows).
-  double rowPerpE = -rowDN;
-  double rowPerpN =  rowDE;
-  // Perpendicular-to-tree (stepping between tree positions along a row).
-  double treePerpE = -treeDN;
-  double treePerpN =  treeDE;
-
-  // Line-line intersection in flat E/N space.
-  // Solve: (rowE + s*rowDE) = (treeE + u*treeDE)
-  //        (rowN + s*rowDN) = (treeN + u*treeDN)
-  // For each (r, t) offset pair.
   for (int r = 0; r < gNumRows; r++) {
-    double rE = gRowE + r * gRowSpacing * rowPerpE;
-    double rN = gRowN + r * gRowSpacing * rowPerpN;
+    double baseE = gAbOriginE + r * gRowSpacing * treeDE;
+    double baseN = gAbOriginN + r * gRowSpacing * treeDN;
     for (int t = 0; t < gNumTrees; t++) {
-      double tE = gTreeE + t * gTreeSpacing * treePerpE;
-      double tN = gTreeN + t * gTreeSpacing * treePerpN;
-      double denom = rowDE * treeDN - rowDN * treeDE;
-      if (fabs(denom) < 1e-10) continue;   // lines parallel — skip
-      double s = ((tE - rE) * treeDN - (tN - rN) * treeDE) / denom;
-      double iE = rE + s * rowDE;
-      double iN = rN + s * rowDN;
       if (numIntersections >= MAX_INTERSECTIONS) break;
+      double iE = baseE + t * gTreeSpacing * rowDE;
+      double iN = baseN + t * gTreeSpacing * rowDN;
       lastRawIntersections++;
-      // Clip to boundary polygon if one was loaded
       if (gHasBoundary && !pointInBoundary(iE, iN)) continue;
       intersections[numIntersections].e = (float)iE;
       intersections[numIntersections].n = (float)iN;
@@ -1550,17 +1549,21 @@ void buildAbIntersections() {
     }
   }
   if (gHasBoundary) {
-    Serial.printf("[AB] Built %d intersections (%d → %d after boundary clip, row='%s', tree='%s')\n",
+    Serial.printf("[AB] Built %d intersections (%d → %d after boundary clip, origin=%.2f,%.2f, row='%s' hdg=%.2f, tree='%s' hdg=%.2f)\n",
                   numIntersections, lastRawIntersections, numIntersections,
-                  gRowLineName, gTreeLineName);
+                  gAbOriginE, gAbOriginN,
+                  gRowLineName, gRowHdg, gTreeLineName, gTreeHdg);
   } else {
-    Serial.printf("[AB] Built %d intersections (row='%s' hdg=%.2f, tree='%s' hdg=%.2f)\n",
-                  numIntersections, gRowLineName, gRowHdg, gTreeLineName, gTreeHdg);
+    Serial.printf("[AB] Built %d intersections (origin=%.2f,%.2f, row='%s' hdg=%.2f, tree='%s' hdg=%.2f)\n",
+                  numIntersections, gAbOriginE, gAbOriginN,
+                  gRowLineName, gRowHdg, gTreeLineName, gTreeHdg);
   }
 }
 
 // ── Resolve named lines against gAbLinesRaw; update state ────
 // Called after upload, after "apply", and on boot if we have raw.
+// Also computes gAbOriginE/N = true intersection of the two AB lines,
+// which is the origin (row 0 / tree 0) of the generated grid.
 void resolveActiveABLines() {
   gHasLines = false;
   if (gAbLinesRaw.length() == 0) return;
@@ -1574,6 +1577,22 @@ void resolveActiveABLines() {
   }
   gRowE = rE; gRowN = rN; gRowHdg = rH;
   gTreeE = tE; gTreeN = tN; gTreeHdg = tH;
+
+  // Solve line-line intersection of the two AB lines to get the true
+  // row-0 / tree-0 anchor. Works for any angle between them (AOG users
+  // don't always draw them exactly perpendicular).
+  double rowHdgR  = gRowHdg  * M_PI / 180.0;
+  double treeHdgR = gTreeHdg * M_PI / 180.0;
+  double rowDE  = sin(rowHdgR),  rowDN  = cos(rowHdgR);
+  double treeDE = sin(treeHdgR), treeDN = cos(treeHdgR);
+  double denom  = rowDE * treeDN - rowDN * treeDE;
+  if (fabs(denom) < 1e-9) {
+    Serial.println("[AB] Row and Tree AB lines are parallel — grid cannot be built");
+    return;
+  }
+  double s = ((gTreeE - gRowE) * treeDN - (gTreeN - gRowN) * treeDE) / denom;
+  gAbOriginE = gRowE + s * rowDE;
+  gAbOriginN = gRowN + s * rowDN;
   gHasLines = true;
 }
 
@@ -1662,6 +1681,14 @@ void handleRoot() {
 }
 
 void handleStatus() {
+  // In AB mode, the Active Grid card should show the *real* origin and
+  // bearing — i.e. the intersection of the two AB lines and the Row line
+  // heading. Fall back to stored Simple-mode values otherwise.
+  double activeLat = gOriginLat, activeLon = gOriginLon, activeBrg = gRowBearing;
+  if (gGridMode == MODE_AB && gHasLines && gHasField) {
+    localToLatLon(gAbOriginE, gAbOriginN, activeLat, activeLon);
+    activeBrg = gRowHdg;
+  }
   char json[800];
   snprintf(json, sizeof(json),
     "{\"wifi\":%s,\"mqtt\":%s,\"fix\":%s,"
@@ -1681,7 +1708,7 @@ void handleStatus() {
     FW_VERSION, millis()/1000,
     totalHits, lastRow, lastTree, lastDist,
     curLat, curLon, gHeading,
-    gOriginLat, gOriginLon, gRowBearing,
+    activeLat, activeLon, activeBrg,
     gRowSpacing, gTreeSpacing, gNumRows, gNumTrees,
     gHitRadius, gRelayPulse, gWifiSsid, gUdpPort,
     gGridMode, numIntersections,
@@ -2121,6 +2148,38 @@ void handleGrid() {
                        i ? "," : "", lat, lon);
       out.concat(buf, n);
     }
+  }
+  out += "]";
+
+  // AB-line segments so the dashboard can overlay them on the map and
+  // the user can see whether the Row/Tree lines match the actual trees.
+  // Each segment starts ~one spacing-unit before the grid origin and
+  // extends one spacing-unit beyond the last tree/row for visibility.
+  auto writeAbSeg = [&](double dE, double dN, double extent) {
+    double pad = (extent < 10.0) ? 10.0 : extent * 0.1;
+    double aE = gAbOriginE - pad * dE;
+    double aN = gAbOriginN - pad * dN;
+    double bE = gAbOriginE + (extent + pad) * dE;
+    double bN = gAbOriginN + (extent + pad) * dN;
+    double lat1, lon1, lat2, lon2;
+    localToLatLon(aE, aN, lat1, lon1);
+    localToLatLon(bE, bN, lat2, lon2);
+    char seg[160];
+    int n = snprintf(seg, sizeof(seg), "[%.7f,%.7f],[%.7f,%.7f]",
+                     lat1, lon1, lat2, lon2);
+    out.concat(seg, n);
+  };
+  out += ",\"rowLine\":[";
+  if (gGridMode == MODE_AB && gHasLines && gHasField) {
+    double rowHdgR = gRowHdg * M_PI / 180.0;
+    writeAbSeg(sin(rowHdgR), cos(rowHdgR),
+               (double)(gNumTrees > 1 ? gNumTrees - 1 : 1) * gTreeSpacing);
+  }
+  out += "],\"treeLine\":[";
+  if (gGridMode == MODE_AB && gHasLines && gHasField) {
+    double treeHdgR = gTreeHdg * M_PI / 180.0;
+    writeAbSeg(sin(treeHdgR), cos(treeHdgR),
+               (double)(gNumRows > 1 ? gNumRows - 1 : 1) * gRowSpacing);
   }
   out += "]}";
 
