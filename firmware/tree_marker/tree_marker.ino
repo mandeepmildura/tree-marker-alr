@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.6"
+#define FW_VERSION "1.4.7"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -732,15 +732,24 @@ var fieldUpload=async ()=>{
   if(bd)body.boundary=bd;
   fetch('/field/upload',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)})
-    .then(r=>r.json()).then(d=>{
+    .then(async r=>{
+      var txt=await r.text();
+      var d; try{d=JSON.parse(txt);}catch(e){d={ok:false,error:txt||('HTTP '+r.status)};}
+      return {d,status:r.status};
+    }).then(({d})=>{
       if(d.ok){
         var msg='OK. '+d.intersections+' intersections';
         if(d.boundary>0)msg+=' ('+d.rawIntersections+' before boundary clip, boundary='+d.boundary+' vertices)';
         msg+='. Lines in file: '+d.linesFound;
         st.textContent=msg;
+        st.style.color='';
         fetchField();poll();refreshMapGrid();
-      } else st.textContent='Error: '+JSON.stringify(d);
-    }).catch(e=>st.textContent='Error: '+e);
+      } else {
+        st.style.color='var(--er)';
+        st.textContent='Upload failed: '+(d.error||'unknown error');
+        if(d.detail) st.textContent+=' — got: '+d.detail;
+      }
+    }).catch(e=>{st.style.color='var(--er)';st.textContent='Upload failed: '+e;});
 };
 var applyLines=()=>{
   var rn=document.getElementById('fd-rname').value.trim();
@@ -1850,14 +1859,34 @@ void handleOtaLatest() {
 // POST /field/upload — JSON body: {"ablines":"...raw text...", "field":"...raw..."}
 // Stores raw text in NVS, parses field offsets, resolves AB lines,
 // rebuilds intersection grid.
+// Escape a string for embedding inside a JSON string literal.
+static String jsonEscape(const String& s) {
+  String out; out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if      (c == '"')  out += "\\\"";
+    else if (c == '\\') out += "\\\\";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else if ((unsigned char)c < 0x20) { char b[8]; snprintf(b,sizeof(b),"\\u%04x",c); out += b; }
+    else out += c;
+  }
+  return out;
+}
+
+// Helper: send a JSON error reply so the client never has to parse plain text.
+static void sendJsonErr(int code, const char* err, const String& detail = "") {
+  String body = String("{\"ok\":false,\"error\":\"") + jsonEscape(err) + "\"";
+  if (detail.length() > 0) body += ",\"detail\":\"" + jsonEscape(detail) + "\"";
+  body += "}";
+  webServer.send(code, "application/json", body);
+}
+
 void handleFieldUpload() {
-  if (webServer.method() != HTTP_POST) {
-    webServer.send(405, "text/plain", "POST only"); return;
-  }
+  if (webServer.method() != HTTP_POST) { sendJsonErr(405, "POST only"); return; }
   String body = webServer.arg("plain");
-  if (body.length() == 0) {
-    webServer.send(400, "text/plain", "Empty body"); return;
-  }
+  if (body.length() == 0) { sendJsonErr(400, "Empty request body"); return; }
 
   // Extract "ablines" and "field" strings from JSON by locating keys.
   // Not a full JSON parser — expects simple {"ablines":"...","field":"..."}
@@ -1893,14 +1922,19 @@ void handleFieldUpload() {
   String field  = extract(body, "field");
   String bndRaw = extract(body, "boundary");  // optional
   if (ab.length() == 0 || field.length() == 0) {
-    webServer.send(400, "text/plain",
-      "Missing ablines or field in payload"); return;
+    sendJsonErr(400, "Missing ABLines.txt or Field.txt in payload"); return;
   }
 
   double fe, fn; int fz;
   if (!parseFieldTxt(field, fe, fn, fz)) {
-    webServer.send(400, "text/plain",
-      "Could not parse Field.txt (missing $Offsets?)"); return;
+    // Include a preview of what we received so the user can see what went wrong.
+    String head = field; head.trim();
+    if (head.length() > 120) head = head.substring(0, 120) + "...";
+    sendJsonErr(400,
+      "Could not parse Field.txt — expected a '$Offsets' line followed by 'easting,northing,zone'. "
+      "Is this the Field.txt from your AgOpenGPS field folder?",
+      head);
+    return;
   }
 
   gFieldUtmE = fe; gFieldUtmN = fn; gFieldZone = fz;
