@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.9"
+#define FW_VERSION "1.4.10"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -387,7 +387,7 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
 .subhead{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--tv);margin:4px 0 8px}
 .fg.simple-only.disabled{opacity:.45}
 .fg.simple-only.disabled input{background:var(--sc);cursor:not-allowed}
-.fg.simple-only.disabled label::after{content:" (auto from AB)";font-weight:600;color:#0369a1;text-transform:none;letter-spacing:0}
+.btn:disabled{opacity:.45;cursor:not-allowed}.btn:disabled:active{transform:none}
 </style>
 </head>
 <body>
@@ -525,7 +525,7 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
   <div class=card>
     <div class=clbl>Field Grid</div>
     <div id=grid-mode-banner class=mode-banner></div>
-    <div class="subhead" id=simple-subhead>Simple Mode &mdash; Origin &amp; Bearing</div>
+    <div class="subhead" id=simple-subhead>Origin &amp; Bearing</div>
     <div id=simple-fields class=g2>
       <div class="fg simple-only"><label>Origin Latitude</label><input id=f-lat type=number step=0.0000001></div>
       <div class="fg simple-only"><label>Origin Longitude</label><input id=f-lon type=number step=0.0000001></div>
@@ -533,15 +533,15 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     </div>
     <div class="subhead" style="margin-top:14px">Plant Pattern &amp; Detection</div>
     <div class=g2>
-      <div class=fg><label>Row Spacing (m)</label><input id=f-rs type=number step=0.1></div>
-      <div class=fg><label>Tree Spacing (m)</label><input id=f-ts type=number step=0.1></div>
-      <div class=fg><label>Hit Radius (m)</label><input id=f-hr type=number step=0.01></div>
-      <div class=fg><label>Number of Rows (max 20)</label><input id=f-nr type=number step=1 min=1 max=20></div>
-      <div class=fg><label>Trees per Row (max 100)</label><input id=f-nt type=number step=1 min=1 max=100></div>
-      <div class=fg style="grid-column:1/-1"><label>Relay Pulse (ms)</label><input id=f-rp type=number step=50></div>
+      <div class="fg simple-only"><label>Row Spacing (m)</label><input id=f-rs type=number step=0.1></div>
+      <div class="fg simple-only"><label>Tree Spacing (m)</label><input id=f-ts type=number step=0.1></div>
+      <div class="fg simple-only"><label>Hit Radius (m)</label><input id=f-hr type=number step=0.01></div>
+      <div class="fg simple-only"><label>Number of Rows (max 20)</label><input id=f-nr type=number step=1 min=1 max=20></div>
+      <div class="fg simple-only"><label>Trees per Row (max 100)</label><input id=f-nt type=number step=1 min=1 max=100></div>
+      <div class="fg simple-only" style="grid-column:1/-1"><label>Relay Pulse (ms)</label><input id=f-rp type=number step=50></div>
     </div>
-    <button class="btn btn-p" onclick=saveGrid() style="margin-top:10px"><span>Save Grid + Apply Now</span><span class=bi>&#10003;</span></button>
-    <p class=note>Grid rebuilds immediately &mdash; no reboot needed.</p>
+    <button class="btn btn-p" id=save-grid-btn onclick=saveGrid() style="margin-top:10px"><span>Save Grid + Apply Now</span><span class=bi>&#10003;</span></button>
+    <p class=note id=save-grid-note>Grid rebuilds immediately &mdash; no reboot needed.</p>
   </div>
   <div class=card>
     <div class=clbl>Antenna &rarr; Nozzle Offset</div>
@@ -847,27 +847,32 @@ var applyModeUi=(c)=>{
   var abActive=(c.mode===1 && c.hasLines);
   var banner=document.getElementById('grid-mode-banner');
   var subhead=document.getElementById('simple-subhead');
+  var btn=document.getElementById('save-grid-btn');
+  var note=document.getElementById('save-grid-note');
   if(!banner) return;
   document.querySelectorAll('.fg.simple-only').forEach(el=>{
     el.classList.toggle('disabled',abActive);
     var inp=el.querySelector('input'); if(inp) inp.disabled=abActive;
   });
+  if(btn) btn.disabled=abActive;
   if(abActive){
     banner.className='mode-banner ab';
     var aLat=(c.anchorLat!==undefined?c.anchorLat:0).toFixed(7);
     var aLon=(c.anchorLon!==undefined?c.anchorLon:0).toFixed(7);
     var rHdg=(c.rowHdg!==undefined?c.rowHdg:0).toFixed(1);
     banner.innerHTML='<b>Mode: AB (from AgOpenGPS)</b><br>'+
-      'Origin &amp; bearing come from your AB lines — the three fields below are disabled. '+
+      'All Grid Parameters below are disabled in AB mode &mdash; the grid is driven entirely by your AB lines and (optionally) a boundary. '+
       'To edit them manually, switch to Simple mode on the Field tab.<br>'+
       '<span style="color:var(--mu)">Active anchor: <code>'+aLat+', '+aLon+'</code> &middot; '+
       'Row heading: <code>'+rHdg+'°</code></span>';
     if(subhead) subhead.style.opacity='.5';
+    if(note) note.textContent='Switch to Simple mode on the Field tab to edit grid parameters.';
   } else {
     banner.className='mode-banner';
-    banner.innerHTML='<b>Mode: Simple</b> &mdash; all fields below are active. '+
+    banner.innerHTML='<b>Mode: Simple</b> &mdash; all Grid Parameters below are active. '+
       'Upload AB lines on the Field tab to switch to AB mode.';
     if(subhead) subhead.style.opacity='';
+    if(note) note.textContent='Grid rebuilds immediately — no reboot needed.';
   }
 };
 var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
