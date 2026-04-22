@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.7"
+#define FW_VERSION "1.4.8"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -121,9 +121,11 @@ bool   hasPrevFix = false;
 int    gGridMode;                 // MODE_SIMPLE or MODE_AB
 char   gRowLineName[48];          // name of row AB line in ABLines.txt
 char   gTreeLineName[48];         // name of tree AB line in ABLines.txt
-double gFieldUtmE;                // UTM easting offset from Field.txt
-double gFieldUtmN;                // UTM northing offset from Field.txt
-int    gFieldZone;                // UTM zone
+double gFieldUtmE;                // (legacy — unused since v1.4.8)
+double gFieldUtmN;                // (legacy — unused since v1.4.8)
+int    gFieldZone;                // (legacy — unused since v1.4.8)
+double gAnchorLat = 0;            // StartFix lat from AOG Field.txt
+double gAnchorLon = 0;            // StartFix lon from AOG Field.txt
 double gRowE, gRowN, gRowHdg;     // selected row AB line: point + heading(deg)
 double gTreeE, gTreeN, gTreeHdg;  // selected tree AB line: point + heading(deg)
 bool   gHasField  = false;        // true once Field.txt offsets are stored
@@ -172,6 +174,8 @@ void loadPrefs() {
   gFieldUtmE = prefs.getDouble("field_e", 0.0);
   gFieldUtmN = prefs.getDouble("field_n", 0.0);
   gFieldZone = prefs.getInt(   "field_z", 0);
+  gAnchorLat = prefs.getDouble("anchor_lat", 0.0);
+  gAnchorLon = prefs.getDouble("anchor_lon", 0.0);
   gHasField  = prefs.getBool(  "has_field", false);
   gHasLines  = prefs.getBool(  "has_lines", false);
   gRowE   = prefs.getDouble("row_e",   0);
@@ -203,6 +207,8 @@ void saveAbPrefs() {
   prefs.putDouble("field_e",   gFieldUtmE);
   prefs.putDouble("field_n",   gFieldUtmN);
   prefs.putInt(   "field_z",   gFieldZone);
+  prefs.putDouble("anchor_lat", gAnchorLat);
+  prefs.putDouble("anchor_lon", gAnchorLon);
   prefs.putBool(  "has_field", gHasField);
   prefs.putBool(  "has_lines", gHasLines);
   prefs.putDouble("row_e",  gRowE);
@@ -474,7 +480,7 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
     <div class=clbl>Current State</div>
     <div class=sr><span class=sk>Grid mode</span><span class=sv id=fd-mode>&mdash;</span></div>
     <div class=sr><span class=sk>Intersections</span><span class="sv gr" id=fd-n>&mdash;</span></div>
-    <div class=sr><span class=sk>Field offsets</span><span class="sv bl" id=fd-offset style="font-size:11px">&mdash;</span></div>
+    <div class=sr><span class=sk>Anchor (StartFix)</span><span class="sv bl" id=fd-offset style="font-size:11px">&mdash;</span></div>
     <div class=sr><span class=sk>Active row line</span><span class=sv id=fd-rline>&mdash;</span></div>
     <div class=sr><span class=sk>Active tree line</span><span class=sv id=fd-tline>&mdash;</span></div>
     <div class=sr><span class=sk>Lines in file</span><span class="sv bl" id=fd-avail style="font-size:11px">&mdash;</span></div>
@@ -706,7 +712,7 @@ var fetchField=()=>{
     document.getElementById('fd-n').textContent=nlbl;
     var f=d.field;
     document.getElementById('fd-offset').textContent=d.hasField?
-      ('E='+f.e.toFixed(1)+'  N='+f.n.toFixed(1)+'  Zone '+f.zone):'(not loaded)';
+      (f.anchorLat.toFixed(7)+', '+f.anchorLon.toFixed(7)):'(not loaded)';
     document.getElementById('fd-rline').textContent=d.hasLines?d.rowName:(d.rowName+' (not found)');
     document.getElementById('fd-tline').textContent=d.hasLines?d.treeName:(d.treeName+' (not found)');
     document.getElementById('fd-avail').textContent=d.availableLines||'(no file uploaded)';
@@ -1231,11 +1237,12 @@ void latLonToUTM(double lat, double lon, int zone, double& utmE, double& utmN) {
 }
 
 // GPS lat/lon → field-local easting/northing (same frame as AB lines).
+// Flat-earth projection anchored at Field.txt $StartFix. Sub-millimetre
+// accurate within 5km of the anchor, which easily covers any single field.
 void latLonToLocal(double lat, double lon, double& localE, double& localN) {
-  double utmE, utmN;
-  latLonToUTM(lat, lon, gFieldZone, utmE, utmN);
-  localE = utmE - gFieldUtmE;
-  localN = utmN - gFieldUtmN;
+  const double MPD = 111320.0;
+  localN = (lat - gAnchorLat) * MPD;
+  localE = (lon - gAnchorLon) * MPD * cos(gAnchorLat * M_PI / 180.0);
 }
 
 // ── WGS84 UTM inverse projection ──────────────────────────────
@@ -1283,17 +1290,27 @@ void utmToLatLon(double utmE, double utmN, int zone, double& lat, double& lon) {
   lon = lonR * 180.0 / M_PI;
 }
 
-// Local E/N → lat/lon (inverse of latLonToLocal)
+// Local E/N → lat/lon (inverse of latLonToLocal).
 void localToLatLon(double localE, double localN, double& lat, double& lon) {
-  utmToLatLon(localE + gFieldUtmE, localN + gFieldUtmN, gFieldZone, lat, lon);
+  const double MPD = 111320.0;
+  lat = gAnchorLat + localN / MPD;
+  lon = gAnchorLon + localE / (MPD * cos(gAnchorLat * M_PI / 180.0));
 }
 
 // ── AOG Field.txt parser ──────────────────────────────────────
-// Looks for:
+// Modern AOG (v6+) stores $Offsets as 0,0 and the real anchor as StartFix.
+// All coordinates in ABLines.txt / Boundary.txt are meters relative to this
+// anchor, so we project with a flat-earth approximation from it. Example:
+//   $FieldDir
+//   MyField
 //   $Offsets
-//   611892,5819115,31
-bool parseFieldTxt(const String& raw, double& e, double& n, int& zone) {
-  int idx = raw.indexOf("$Offsets");
+//   0,0
+//   Convergence
+//   0
+//   StartFix
+//   -34.3145508,142.1541669
+bool parseFieldTxt(const String& raw, double& anchorLat, double& anchorLon) {
+  int idx = raw.indexOf("StartFix");
   if (idx < 0) return false;
   int nl = raw.indexOf('\n', idx);
   if (nl < 0) return false;
@@ -1301,13 +1318,11 @@ bool parseFieldTxt(const String& raw, double& e, double& n, int& zone) {
   if (nl2 < 0) nl2 = raw.length();
   String line = raw.substring(nl + 1, nl2);
   line.trim();
-  int c1 = line.indexOf(',');
-  int c2 = line.indexOf(',', c1 + 1);
-  if (c1 < 0 || c2 < 0) return false;
-  e = line.substring(0, c1).toDouble();
-  n = line.substring(c1 + 1, c2).toDouble();
-  zone = line.substring(c2 + 1).toInt();
-  return (zone > 0);
+  int c = line.indexOf(',');
+  if (c < 0) return false;
+  anchorLat = line.substring(0, c).toDouble();
+  anchorLon = line.substring(c + 1).toDouble();
+  return (fabs(anchorLat) > 0.001 && fabs(anchorLon) > 0.001);
 }
 
 // ── AOG ABLines.txt line finder ───────────────────────────────
@@ -1925,19 +1940,20 @@ void handleFieldUpload() {
     sendJsonErr(400, "Missing ABLines.txt or Field.txt in payload"); return;
   }
 
-  double fe, fn; int fz;
-  if (!parseFieldTxt(field, fe, fn, fz)) {
+  double aLat, aLon;
+  if (!parseFieldTxt(field, aLat, aLon)) {
     // Include a preview of what we received so the user can see what went wrong.
     String head = field; head.trim();
     if (head.length() > 120) head = head.substring(0, 120) + "...";
     sendJsonErr(400,
-      "Could not parse Field.txt — expected a '$Offsets' line followed by 'easting,northing,zone'. "
+      "Could not parse Field.txt — expected a 'StartFix' line followed by 'lat,lon'. "
       "Is this the Field.txt from your AgOpenGPS field folder?",
       head);
     return;
   }
 
-  gFieldUtmE = fe; gFieldUtmN = fn; gFieldZone = fz;
+  gAnchorLat = aLat; gAnchorLon = aLon;
+  gFieldUtmE = 0; gFieldUtmN = 0; gFieldZone = 0;  // deprecated
   gHasField  = true;
   gAbLinesRaw = ab;
 
@@ -1963,16 +1979,16 @@ void handleFieldUpload() {
   listABLineNames(gAbLinesRaw, names, sizeof(names));
   char out[520];
   snprintf(out, sizeof(out),
-    "{\"ok\":true,\"field\":{\"e\":%.1f,\"n\":%.1f,\"zone\":%d},"
+    "{\"ok\":true,\"field\":{\"anchorLat\":%.7f,\"anchorLon\":%.7f},"
     "\"linesFound\":\"%s\",\"rowOk\":%s,\"treeOk\":%s,"
     "\"intersections\":%d,\"rawIntersections\":%d,"
     "\"boundary\":%d,\"mode\":%d}",
-    fe, fn, fz, names,
+    gAnchorLat, gAnchorLon, names,
     gHasLines ? "true" : "false", gHasLines ? "true" : "false",
     numIntersections, lastRawIntersections, numBoundary, gGridMode);
   webServer.send(200, "application/json", out);
-  Serial.printf("[AB] Upload OK: field E=%.1f N=%.1f Z=%d, %d intersections, boundary=%d\n",
-                fe, fn, fz, numIntersections, numBoundary);
+  Serial.printf("[AB] Upload OK: anchor=(%.7f,%.7f), %d intersections, boundary=%d\n",
+                gAnchorLat, gAnchorLon, numIntersections, numBoundary);
 }
 
 // POST /field/apply — {"rowName":"Row","treeName":"Tree","mode":1}
@@ -2109,13 +2125,13 @@ void handleFieldState() {
   char out[700];
   snprintf(out, sizeof(out),
     "{\"mode\":%d,\"hasField\":%s,\"hasLines\":%s,"
-    "\"field\":{\"e\":%.1f,\"n\":%.1f,\"zone\":%d},"
+    "\"field\":{\"anchorLat\":%.7f,\"anchorLon\":%.7f},"
     "\"rowName\":\"%s\",\"treeName\":\"%s\","
     "\"availableLines\":\"%s\",\"intersections\":%d,"
     "\"rawIntersections\":%d,\"hasBoundary\":%s,\"boundary\":%d,"
     "\"abSize\":%d}",
     gGridMode, gHasField ? "true" : "false", gHasLines ? "true" : "false",
-    gFieldUtmE, gFieldUtmN, gFieldZone,
+    gAnchorLat, gAnchorLon,
     gRowLineName, gTreeLineName, names,
     numIntersections, lastRawIntersections,
     gHasBoundary ? "true" : "false", numBoundary,
