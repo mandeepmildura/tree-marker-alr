@@ -23,7 +23,7 @@
 #include <DNSServer.h>
 
 // ── Firmware version (bumped on each release) ─────────────────
-#define FW_VERSION "1.4.8"
+#define FW_VERSION "1.4.9"
 
 // ================================================================
 //  COMPILED-IN DEFAULTS — overridden by Preferences after first save
@@ -380,6 +380,14 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
 .tractor-arrow{background:transparent !important;border:none !important}
 .tractor-lbl{position:absolute;top:26px;left:50%;transform:translateX(-50%);white-space:nowrap;background:rgba(3,105,161,.95);color:#fff;font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.3);letter-spacing:.3px}
 .nozzle-dot{background:transparent !important;border:none !important}
+.mode-banner{font-size:12px;padding:10px 12px;border-radius:8px;margin-bottom:14px;line-height:1.55;border-left:4px solid var(--pr);background:#ecfdf5}
+.mode-banner.ab{background:#eff6ff;border-left-color:#0369a1}
+.mode-banner b{font-family:'Space Grotesk',sans-serif;letter-spacing:.3px}
+.mode-banner code{font-family:'Space Grotesk',sans-serif;background:rgba(255,255,255,.6);padding:1px 5px;border-radius:4px;font-weight:600}
+.subhead{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--tv);margin:4px 0 8px}
+.fg.simple-only.disabled{opacity:.45}
+.fg.simple-only.disabled input{background:var(--sc);cursor:not-allowed}
+.fg.simple-only.disabled label::after{content:" (auto from AB)";font-weight:600;color:#0369a1;text-transform:none;letter-spacing:0}
 </style>
 </head>
 <body>
@@ -516,10 +524,15 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
   </div>
   <div class=card>
     <div class=clbl>Field Grid</div>
+    <div id=grid-mode-banner class=mode-banner></div>
+    <div class="subhead" id=simple-subhead>Simple Mode &mdash; Origin &amp; Bearing</div>
+    <div id=simple-fields class=g2>
+      <div class="fg simple-only"><label>Origin Latitude</label><input id=f-lat type=number step=0.0000001></div>
+      <div class="fg simple-only"><label>Origin Longitude</label><input id=f-lon type=number step=0.0000001></div>
+      <div class="fg simple-only" style="grid-column:1/-1"><label>Row Bearing (&#176;) &mdash; 0=N 90=E 180=S</label><input id=f-brg type=number step=0.1></div>
+    </div>
+    <div class="subhead" style="margin-top:14px">Plant Pattern &amp; Detection</div>
     <div class=g2>
-      <div class=fg><label>Origin Latitude</label><input id=f-lat type=number step=0.0000001></div>
-      <div class=fg><label>Origin Longitude</label><input id=f-lon type=number step=0.0000001></div>
-      <div class=fg><label>Row Bearing (&#176;) &mdash; 0=N 90=E 180=S</label><input id=f-brg type=number step=0.1></div>
       <div class=fg><label>Row Spacing (m)</label><input id=f-rs type=number step=0.1></div>
       <div class=fg><label>Tree Spacing (m)</label><input id=f-ts type=number step=0.1></div>
       <div class=fg><label>Hit Radius (m)</label><input id=f-hr type=number step=0.01></div>
@@ -527,7 +540,7 @@ main{max-width:920px;margin:0 auto;padding:22px 20px 48px}
       <div class=fg><label>Trees per Row (max 100)</label><input id=f-nt type=number step=1 min=1 max=100></div>
       <div class=fg style="grid-column:1/-1"><label>Relay Pulse (ms)</label><input id=f-rp type=number step=50></div>
     </div>
-    <button class="btn btn-p" onclick=saveGrid() style="margin-top:6px"><span>Save Grid + Apply Now</span><span class=bi>&#10003;</span></button>
+    <button class="btn btn-p" onclick=saveGrid() style="margin-top:10px"><span>Save Grid + Apply Now</span><span class=bi>&#10003;</span></button>
     <p class=note>Grid rebuilds immediately &mdash; no reboot needed.</p>
   </div>
   <div class=card>
@@ -819,11 +832,43 @@ var poll=()=>{
       'F/A '+(c.fa!==undefined?c.fa.toFixed(2):0)+'m, Lat '+(c.lat_off!==undefined?c.lat_off.toFixed(2):0)+'m';
     window._cfg=c;
     if(!_formFilled)fillForm(c);
+    applyModeUi(c);
     // Refresh hit log when count changes or once on initial load.
     if(d.hits!==_lastHitCount){_lastHitCount=d.hits;fetchHits();}
     // Live tractor marker on the map (only effective if map tab has loaded)
     updateMapTractor(d.lat,d.lon,d.fix,d.hdg,c&&c.fa,c&&c.lat_off);
   }).catch(()=>{});
+};
+// Toggle the Simple-only fields and banner based on current mode.
+// When mode=AB and AB lines are resolved, Origin lat/lon/brg are derived
+// from the AB anchor + Row line heading — disable the inputs and show the
+// active values so the user isn't misled by the stale stored Simple values.
+var applyModeUi=(c)=>{
+  var abActive=(c.mode===1 && c.hasLines);
+  var banner=document.getElementById('grid-mode-banner');
+  var subhead=document.getElementById('simple-subhead');
+  if(!banner) return;
+  document.querySelectorAll('.fg.simple-only').forEach(el=>{
+    el.classList.toggle('disabled',abActive);
+    var inp=el.querySelector('input'); if(inp) inp.disabled=abActive;
+  });
+  if(abActive){
+    banner.className='mode-banner ab';
+    var aLat=(c.anchorLat!==undefined?c.anchorLat:0).toFixed(7);
+    var aLon=(c.anchorLon!==undefined?c.anchorLon:0).toFixed(7);
+    var rHdg=(c.rowHdg!==undefined?c.rowHdg:0).toFixed(1);
+    banner.innerHTML='<b>Mode: AB (from AgOpenGPS)</b><br>'+
+      'Origin &amp; bearing come from your AB lines — the three fields below are disabled. '+
+      'To edit them manually, switch to Simple mode on the Field tab.<br>'+
+      '<span style="color:var(--mu)">Active anchor: <code>'+aLat+', '+aLon+'</code> &middot; '+
+      'Row heading: <code>'+rHdg+'°</code></span>';
+    if(subhead) subhead.style.opacity='.5';
+  } else {
+    banner.className='mode-banner';
+    banner.innerHTML='<b>Mode: Simple</b> &mdash; all fields below are active. '+
+      'Upload AB lines on the Field tab to switch to AB mode.';
+    if(subhead) subhead.style.opacity='';
+  }
 };
 var testRelay=()=>{fetch('/relay',{method:'POST'}).then(()=>alert('Relay fired!'));};
 var saveGrid=()=>{
@@ -1622,6 +1667,7 @@ void handleStatus() {
     "\"rs\":%.1f,\"ts\":%.1f,\"rows\":%d,\"trees\":%d,"
     "\"hr\":%.2f,\"rp\":%d,\"ssid\":\"%s\",\"udp\":%d,"
     "\"mode\":%d,\"nInt\":%d,\"hasField\":%s,\"hasLines\":%s,"
+    "\"anchorLat\":%.7f,\"anchorLon\":%.7f,\"rowHdg\":%.1f,"
     "\"fa\":%.2f,\"lat_off\":%.2f}}",
     WiFi.status()==WL_CONNECTED?"true":"false",
     mqtt.connected()?"true":"false",
@@ -1636,6 +1682,7 @@ void handleStatus() {
     gGridMode, numIntersections,
     gHasField ? "true" : "false",
     gHasLines ? "true" : "false",
+    gAnchorLat, gAnchorLon, gRowHdg,
     gForeAft, gLateral
   );
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
