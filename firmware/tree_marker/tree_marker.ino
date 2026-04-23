@@ -1978,66 +1978,94 @@ static void pickOuterDxfLines() {
   gHasEdges = true;
 }
 
-// Serialise a single TrackLines.txt record matching AOG v6's layout
-// (name, mode=0, heading, two points). The exact v6 format is
-// whitespace-separated lines in practice: <name> / <mode> / <heading>
-// / <P1 easting> / <P1 northing> / <P2 easting> / <P2 northing>.
-// We emit one record per new-line-separated block so AOG can splice
-// it into the existing TrackLines file without extra framing.
-static String formatTrackRecord(const char* name, float hdg,
+// Serialise a single TrackLines.txt record in AOG v6 format:
+//   <name>
+//   <heading in radians>
+//   <ptA.E>,<ptA.N>
+//   <ptB.E>,<ptB.N>
+//   <nudge offset>
+//   <mode>        (2 = AB line in the observed sample)
+//   <visible>     (True/False)
+//   <trailing flag>   (0 in the observed sample)
+// Lines use CRLF to match the Windows-side AOG file, 8 lines per record.
+static String formatTrackRecord(const char* name, float hdgDeg,
                                 float x1, float y1, float x2, float y2) {
-  char buf[240];
+  float hdgRad = hdgDeg * (float)(M_PI / 180.0);
+  char buf[260];
   snprintf(buf, sizeof(buf),
-    "$TrackLine\n%s\n0\n%.3f\n%.3f\n%.3f\n%.3f\n%.3f\n",
-    name, hdg, x1, y1, x2, y2);
+    "%s\r\n"
+    "%.15f\r\n"
+    "%.3f,%.3f\r\n"
+    "%.3f,%.3f\r\n"
+    "0\r\n"
+    "2\r\n"
+    "True\r\n"
+    "0\r\n",
+    name, hdgRad, x1, y1, x2, y2);
   return String(buf);
 }
 
-// Strip any pre-existing $TrackLine blocks whose name matches either
-// edge-line name, so re-uploads overwrite cleanly rather than duplicate.
-// The function is conservative: if the file doesn't use $TrackLine
-// framing, it's returned unchanged.
+// AOG TrackLines.txt layout is: "$TrackLines" header line, then
+// fixed-size 8-line records per track. Strip any record whose name
+// matches either edge-line name so re-uploads overwrite cleanly.
+// Falls back to returning the source unchanged if no $TrackLines
+// header is present (so custom / hand-edited files aren't mangled).
 static String stripPriorEdges(const String& src,
                               const char* nameA, const char* nameB) {
-  String out; out.reserve(src.length() + 8);
-  int cursor = 0;
+  int hdr = src.indexOf("$TrackLines");
+  if (hdr < 0) return src;
+  int nl = src.indexOf('\n', hdr);
+  if (nl < 0) return src;
+  String out; out.reserve(src.length() + 16);
+  out += src.substring(0, nl + 1);  // keep everything up to and incl the header line
+  int cursor = nl + 1;
+  const int RECORD_LINES = 8;
   while (cursor < (int)src.length()) {
-    int hdr = src.indexOf("$TrackLine", cursor);
-    if (hdr < 0) { out += src.substring(cursor); break; }
-    // Copy anything before this header
-    out += src.substring(cursor, hdr);
-    // Find the name (next non-empty line after the header line)
-    int nl1 = src.indexOf('\n', hdr);
-    if (nl1 < 0) { out += src.substring(hdr); break; }
-    int nl2 = src.indexOf('\n', nl1 + 1);
-    String nm = (nl2 < 0) ? src.substring(nl1 + 1)
-                          : src.substring(nl1 + 1, nl2);
-    nm.trim();
-    // A $TrackLine block is header + 7 payload lines (name, mode,
-    // heading, 4 coords). Find the end of line 7.
-    int end = nl1;
-    for (int i = 0; i < 7 && end >= 0 && end < (int)src.length(); i++) {
-      end = src.indexOf('\n', end + 1);
+    // Find the 8 line boundaries for this record
+    int pos[RECORD_LINES + 1];
+    pos[0] = cursor;
+    int found = 0;
+    for (int i = 1; i <= RECORD_LINES; i++) {
+      int p = src.indexOf('\n', pos[i - 1]);
+      if (p < 0) { pos[i] = src.length(); break; }
+      pos[i] = p + 1;
+      found = i;
     }
-    if (end < 0) end = src.length();
+    if (found < RECORD_LINES) {
+      // Partial record at end — copy verbatim (don't silently drop).
+      out += src.substring(cursor);
+      break;
+    }
+    // Name is the first line of the record
+    String nm = src.substring(pos[0], pos[1] - 1);
+    // Trim trailing \r from CRLF files
+    while (nm.length() > 0 && (nm.charAt(nm.length() - 1) == '\r' || nm.charAt(nm.length() - 1) == ' ')) {
+      nm.remove(nm.length() - 1);
+    }
     bool match = (nm == nameA) || (nm == nameB);
     if (!match) {
-      out += src.substring(hdr, end + 1);
+      out += src.substring(pos[0], pos[RECORD_LINES]);
     }
-    cursor = end + 1;
+    cursor = pos[RECORD_LINES];
   }
   return out;
 }
 
 // Build the final TrackLines.txt content. If existing is non-empty,
 // prior edges-by-name are stripped and the two new records appended;
-// otherwise a minimal file with just the two records is returned.
+// otherwise a minimal file with a "$TrackLines" header + two records
+// is returned.
 static String buildTrackLinesFile(const String& existing) {
   if (!gHasEdges) return existing;
   String base;
-  if (existing.length() > 0) {
+  if (existing.length() > 0 && existing.indexOf("$TrackLines") >= 0) {
     base = stripPriorEdges(existing, gEdgeRowName, gEdgeTreeName);
-    if (base.length() > 0 && base.charAt(base.length() - 1) != '\n') base += '\n';
+    if (base.length() > 0) {
+      char last = base.charAt(base.length() - 1);
+      if (last != '\n') base += "\r\n";
+    }
+  } else {
+    base = "$TrackLines\r\n";
   }
   base += formatTrackRecord(gEdgeRowName, gEdgeRowHdg,
                             gEdgeRowX1, gEdgeRowY1, gEdgeRowX2, gEdgeRowY2);
